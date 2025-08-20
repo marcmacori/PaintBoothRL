@@ -1,1 +1,5 @@
-# PCLAI-Capstone-PortfolioOpt
+# PCLAI-Capstone-ChemBatchScheduling
+
+Problem Statement: Develop a reinforcement learning (RL) agent to optimize the scheduling and resource allocation of paint panel sample batches across multi-stage processing equipment to minimize total processing time and equipment idle time. The environment models fixed processing durations per stage, and the RL agent must learn optimal sequencing and assignment policies to efficiently manage competing batch flows and limited equipment capacity.
+
+Business Impact Goal: Efficient batch scheduling reduces overall production cycle time and maximizes equipment utilization, leading to increased throughput and reduced operational costs. By minimizing idle times and bottlenecks, the RL-driven scheduling system enables faster order fulfillment and improved plant capacity without additional capital investment. The dynamic scheduling policies derived from the model also provide actionable insights for process improvements, better resource planning, and scalability to handle varying production demands, ultimately boosting competitiveness.
