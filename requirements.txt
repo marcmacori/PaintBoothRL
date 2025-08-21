@@ -1,0 +1,21 @@
+# Paint Booth Environment Dependencies
+
+# Core gym environment
+gym>=0.21.0
+numpy>=1.21.0
+
+# For visualization and analysis
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# For reinforcement learning (optional)
+stable-baselines3>=1.6.0
+torch>=1.12.0
+
+# For data handling
+pandas>=1.4.0
+
+# For development and testing
+pytest>=7.0.0
+jupyter>=1.4.0
+ipykernel>=6.0.0
