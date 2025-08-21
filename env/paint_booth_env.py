@@ -32,6 +32,7 @@ class Panel:
     stage_duration: float
     quality_factor: float = 1.0
     defect_probability: float = 0.0
+    order_size: int = 1  # Total number of panels in the original order
 
 @dataclass
 class Order:
@@ -44,19 +45,30 @@ class Order:
 
 class Equipment:
     """Base class for all equipment in the paint booth"""
-    def __init__(self, name: str, capacity: int, processing_time: float):
+    def __init__(self, name: str, capacity: int, processing_time: float, is_continuous: bool = False):
         self.name = name
         self.capacity = capacity
         self.processing_time = processing_time
         self.panels: List[Panel] = []
         self.busy_until: float = 0.0
+        self.is_continuous = is_continuous  # True for continuous processors, False for batch processors
     
     def is_available(self, current_time: float) -> bool:
-        return len(self.panels) < self.capacity and current_time >= self.busy_until
+        if self.is_continuous:
+            # Continuous processors are available as long as they have capacity
+            return len(self.panels) < self.capacity
+        else:
+            # Batch processors must also not be busy
+            return len(self.panels) < self.capacity and current_time >= self.busy_until
     
     def can_accept(self, panels: List[Panel], current_time: float) -> bool:
-        return (len(self.panels) + len(panels) <= self.capacity and 
-                current_time >= self.busy_until)
+        if self.is_continuous:
+            # Only check capacity, not busy time
+            return len(self.panels) + len(panels) <= self.capacity
+        else:
+            # Check both capacity and busy time
+            return (len(self.panels) + len(panels) <= self.capacity and 
+                    current_time >= self.busy_until)
     
     def add_panels(self, panels: List[Panel], current_time: float):
         if self.can_accept(panels, current_time):
@@ -64,7 +76,9 @@ class Equipment:
                 panel.stage_start_time = current_time
                 panel.stage_duration = self.processing_time
                 self.panels.append(panel)
-            self.busy_until = current_time + self.processing_time
+            # Only set busy_until for batch processors
+            if not self.is_continuous:
+                self.busy_until = current_time + self.processing_time
     
     def get_completed_panels(self, current_time: float) -> List[Panel]:
         completed = []
@@ -83,9 +97,9 @@ class Equipment:
         return completed
 
 class PaintRobot(Equipment):
-    """Paint robot that can handle up to 3 panels from one order"""
+    """Paint robot that can handle up to 3 panels from one order (batch processor)"""
     def __init__(self, name: str, paint_type: PaintType):
-        super().__init__(name, capacity=3, processing_time=15.0)  # 15 minutes
+        super().__init__(name, capacity=3, processing_time=15.0, is_continuous=False)  # Batch processor
         self.paint_type = paint_type
     
     def can_accept_order(self, order: Order, current_time: float) -> bool:
@@ -95,15 +109,15 @@ class PaintRobot(Equipment):
                 current_time >= self.busy_until)
 
 class FlashOffCabinet(Equipment):
-    """Flash off cabinet with capacity for 12 panels"""
+    """Flash off cabinet with capacity for 12 panels (continuous processor)"""
     def __init__(self, name: str, paint_type: PaintType):
-        super().__init__(name, capacity=12, processing_time=10.0)  # 10 minutes
+        super().__init__(name, capacity=12, processing_time=10.0, is_continuous=True)  # Continuous processor
         self.paint_type = paint_type
 
 class Oven(Equipment):
-    """Oven with capacity for 9 panels"""
+    """Oven with capacity for 9 panels (continuous processor)"""
     def __init__(self, name: str, paint_type: PaintType):
-        super().__init__(name, capacity=9, processing_time=20.0)  # 20 minutes (example)
+        super().__init__(name, capacity=9, processing_time=20.0, is_continuous=True)  # Continuous processor
         self.paint_type = paint_type
 
 class BufferZone:
@@ -178,7 +192,8 @@ class OrderGenerator:
                     paint_type=paint_type,
                     stage=ProcessStage.PAINT_ROBOT,
                     stage_start_time=current_time,
-                    stage_duration=0.0
+                    stage_duration=0.0,
+                    order_size=num_panels
                 )
                 panels.append(panel)
                 self.panel_id_counter += 1
@@ -194,7 +209,7 @@ class OrderGenerator:
             self.order_id_counter += 1
         
         return orders
-
+    
 def calculate_quality_factor(actual_time: float, optimal_time: float) -> Tuple[float, float]:
     """Calculate quality factor and defect probability based on timing"""
     time_ratio = actual_time / optimal_time
@@ -227,6 +242,9 @@ class PaintBoothEnv(gym.Env):
     def __init__(self, shift_duration: float = 8.0, time_step: float = 1.0):
         super(PaintBoothEnv, self).__init__()
         
+        # Add metadata for render modes
+        self.metadata = {'render_modes': ['human', 'rgb_array']}
+        
         # Time management
         self.shift_duration = shift_duration * 60  # Convert to minutes
         self.time_step = time_step  # Time step in minutes
@@ -235,22 +253,19 @@ class PaintBoothEnv(gym.Env):
         
         # Initialize equipment
         self.water_paint_robot = PaintRobot("Water Paint Robot", PaintType.WATER)
-        self.solvent_paint_robot = PaintRobot("Solvent Paint Robot", PaintType.SOLVENT)
+        self.solvent_varnish_paint_robot = PaintRobot("Solvent/Varnish Paint Robot", PaintType.SOLVENT)
         
+        # Flash off cabinets: 1 for water, 2 shared for solvent/varnish
         self.water_flash_off = FlashOffCabinet("Water Flash Off", PaintType.WATER)
-        self.solvent_flash_off_1 = FlashOffCabinet("Solvent Flash Off 1", PaintType.SOLVENT)
-        self.solvent_flash_off_2 = FlashOffCabinet("Solvent Flash Off 2", PaintType.SOLVENT)
+        self.solvent_varnish_flash_off_1 = FlashOffCabinet("Solvent/Varnish Flash Off 1", PaintType.SOLVENT)
+        self.solvent_varnish_flash_off_2 = FlashOffCabinet("Solvent/Varnish Flash Off 2", PaintType.SOLVENT)
         
+        # Ovens: 1 for water, 2 shared for solvent/varnish
         self.water_oven = Oven("Water Oven", PaintType.WATER)
-        self.solvent_oven_1 = Oven("Solvent Oven 1", PaintType.SOLVENT)
-        self.solvent_oven_2 = Oven("Solvent Oven 2", PaintType.SOLVENT)
+        self.solvent_varnish_oven_1 = Oven("Solvent/Varnish Oven 1", PaintType.SOLVENT)
+        self.solvent_varnish_oven_2 = Oven("Solvent/Varnish Oven 2", PaintType.SOLVENT)
         
         self.buffer_zone = BufferZone()
-        self.varnish_robot = PaintRobot("Varnish Robot", PaintType.SOLVENT)
-        self.varnish_flash_off_1 = FlashOffCabinet("Varnish Flash Off 1", PaintType.SOLVENT)
-        self.varnish_flash_off_2 = FlashOffCabinet("Varnish Flash Off 2", PaintType.SOLVENT)
-        self.varnish_oven_1 = Oven("Varnish Oven 1", PaintType.SOLVENT)
-        self.varnish_oven_2 = Oven("Varnish Oven 2", PaintType.SOLVENT)
         
         # Order management
         self.order_generator = OrderGenerator(shift_duration)
@@ -265,15 +280,16 @@ class PaintBoothEnv(gym.Env):
         self.total_quality_score = 0.0
         
         # Define action space
-        # Actions: [order_selection, equipment_selection]
+        # Actions: [order_selection, buffer_action]
         # order_selection: which order to process (0 = no action, 1-N = order index)
-        # equipment_selection: which equipment to use when multiple options available
+        # buffer_action: which complete order to move from buffer to varnish (0 = no action, 1-M = order index)
+        # Note: Equipment selection is automatic based on paint type and availability
         max_pending_orders = 50  # Maximum orders in queue
-        max_equipment_choices = 3  # Maximum equipment choices
+        max_buffer_orders = 20  # Maximum complete orders that can be in buffer
         
         self.action_space = spaces.MultiDiscrete([
             max_pending_orders + 1,  # +1 for no action
-            max_equipment_choices
+            max_buffer_orders + 1   # +1 for no action
         ])
         
         # Define observation space
@@ -286,9 +302,10 @@ class PaintBoothEnv(gym.Env):
         
         obs_size = (
             1 +  # Current time (normalized)
-            11 * 3 +  # 11 equipment pieces * 3 features each (busy_until, capacity, current_load)
+            8 * 3 +  # 8 unique equipment pieces * 3 features each (busy_until, capacity, current_load)
             max_pending_orders * 4 +  # Orders * 4 features (paint_type, num_panels, arrival_time, priority)
             3 +  # Buffer zone info (num_panels, avg_wait_time, max_wait_time)
+            max_buffer_orders * 3 +  # Buffer orders * 3 features (num_panels, avg_wait_time, paint_type)
             4   # Quality metrics (completion_rate, defect_rate, avg_quality, throughput)
         )
         
@@ -300,18 +317,27 @@ class PaintBoothEnv(gym.Env):
         )
         
         self.max_pending_orders = max_pending_orders
+        self.max_buffer_orders = max_buffer_orders
+        
+        # Random number generator for reproducible resets
+        self._np_random = None
     
-    def reset(self):
+    def reset(self, seed=None, options=None):
         """Reset the environment to initial state"""
+        # Handle seed for reproducibility
+        super().reset(seed=seed)
+        if seed is not None:
+            self._np_random = np.random.RandomState(seed)
+        else:
+            self._np_random = np.random.RandomState()
+        
         self.current_time = 0.0
         
-        # Reset all equipment
+        # Reset all equipment (note: varnish equipment is shared with solvent equipment)
         equipment_list = [
-            self.water_paint_robot, self.solvent_paint_robot,
-            self.water_flash_off, self.solvent_flash_off_1, self.solvent_flash_off_2,
-            self.water_oven, self.solvent_oven_1, self.solvent_oven_2,
-            self.varnish_robot, self.varnish_flash_off_1, self.varnish_flash_off_2,
-            self.varnish_oven_1, self.varnish_oven_2
+            self.water_paint_robot, self.solvent_varnish_paint_robot,
+            self.water_flash_off, self.solvent_varnish_flash_off_1, self.solvent_varnish_flash_off_2,
+            self.water_oven, self.solvent_varnish_oven_1, self.solvent_varnish_oven_2
         ]
         
         for equipment in equipment_list:
@@ -333,11 +359,14 @@ class PaintBoothEnv(gym.Env):
         self.total_panels_defective = 0
         self.total_quality_score = 0.0
         
-        return self._get_observation()
+        observation = self._get_observation()
+        info = {}
+        
+        return observation, info
     
     def step(self, action):
         """Execute one time step in the environment"""
-        order_selection, equipment_selection = action
+        order_selection, buffer_action = action
         
         # Generate new orders
         new_orders = self.order_generator.generate_orders(self.current_time, self.time_step)
@@ -350,19 +379,22 @@ class PaintBoothEnv(gym.Env):
         reward = 0.0
         if order_selection > 0 and order_selection <= len(self.pending_orders):
             selected_order = list(self.pending_orders)[order_selection - 1]
-            reward += self._process_order(selected_order, equipment_selection)
+            reward += self._process_order(selected_order, 0)  # equipment_selection unused, pass 0
+        
+        # Process buffer zone action
+        if buffer_action > 0:
+            reward += self._process_buffer_action(buffer_action)
         
         # Update all equipment and move panels through stages
         reward += self._update_equipment()
-        
-        # Update buffer zone
-        self._update_buffer_zone()
         
         # Advance time
         self.current_time += self.time_step
         
         # Check if episode is done
         done = self.current_time >= self.shift_duration
+        terminated = done
+        truncated = False  # Add truncated flag for new Gymnasium API
         
         # Calculate additional rewards
         reward += self._calculate_additional_rewards()
@@ -376,20 +408,21 @@ class PaintBoothEnv(gym.Env):
             'completed_panels': self.total_panels_completed,
             'defective_panels': self.total_panels_defective,
             'quality_score': self.total_quality_score / max(1, self.total_panels_completed),
-            'pending_orders': len(self.pending_orders)
+            'pending_orders': len(self.pending_orders),
+            'buffer_orders': len(self._get_complete_orders_in_buffer())
         }
         
-        return obs, reward, done, info
+        return obs, reward, terminated, truncated, info
     
     def _process_order(self, order: Order, equipment_selection: int) -> float:
-        """Process a selected order"""
+        """Process a selected order (equipment_selection parameter is unused)"""
         reward = 0.0
         
-        # Determine which paint robot to use
+        # Determine which paint robot to use (automatic based on paint type)
         if order.paint_type == PaintType.WATER:
             robot = self.water_paint_robot
         else:
-            robot = self.solvent_paint_robot
+            robot = self.solvent_varnish_paint_robot
         
         # Check if robot can accept the order
         if robot.can_accept_order(order, self.current_time):
@@ -410,6 +443,66 @@ class PaintBoothEnv(gym.Env):
             reward -= 1.0  # Penalty for invalid action
         
         return reward
+    
+    def _process_buffer_action(self, buffer_action: int) -> float:
+        """Process agent's decision to move complete orders from buffer to varnish robot"""
+        reward = 0.0
+        
+        # Get list of complete orders in buffer
+        complete_orders = self._get_complete_orders_in_buffer()
+        
+        if buffer_action <= len(complete_orders):
+            selected_order_info = complete_orders[buffer_action - 1]
+            order_id, panels_to_varnish = selected_order_info
+            
+            # Check if varnish robot (shared solvent robot) is available
+            if self.solvent_varnish_paint_robot.is_available(self.current_time) and len(panels_to_varnish) <= 3:
+                # Move panels to varnish robot
+                self.solvent_varnish_paint_robot.add_panels(panels_to_varnish, self.current_time)
+                self.buffer_zone.remove_panels(panels_to_varnish)
+                
+                for panel in panels_to_varnish:
+                    panel.stage = ProcessStage.VARNISH_ROBOT
+                
+                reward += 5.0  # Reward for successfully moving order to varnish
+                
+                # Bonus for moving orders quickly (less buffer wait time)
+                avg_wait_time = sum(self.current_time - p.stage_start_time for p in panels_to_varnish) / len(panels_to_varnish)
+                if avg_wait_time < 2.0:  # Less than 2 minutes average wait
+                    reward += 3.0
+                elif avg_wait_time < 5.0:  # Less than 5 minutes (max allowed)
+                    reward += 1.0
+            else:
+                reward -= 2.0  # Penalty for invalid buffer action
+        else:
+            reward -= 1.0  # Penalty for selecting non-existent buffer order
+        
+        return reward
+    
+    def _get_complete_orders_in_buffer(self) -> List[Tuple[int, List[Panel]]]:
+        """Get list of complete orders in buffer zone that can be moved to varnish"""
+        buffer_panels = self.buffer_zone.get_panels(self.current_time)
+        
+        # Group panels by order
+        orders_in_buffer = {}
+        for panel in buffer_panels:
+            if panel.order_id not in orders_in_buffer:
+                orders_in_buffer[panel.order_id] = []
+            orders_in_buffer[panel.order_id].append(panel)
+        
+        # Find complete orders (all panels from the order are in buffer)
+        complete_orders = []
+        for order_id, panels in orders_in_buffer.items():
+            if len(panels) > 0:
+                expected_order_size = panels[0].order_size
+                if len(panels) == expected_order_size and expected_order_size <= 3:
+                    # Sort by arrival time to prioritize oldest orders first
+                    earliest_time = min(panel.stage_start_time for panel in panels)
+                    complete_orders.append((earliest_time, order_id, panels))
+        
+        # Sort by arrival time and return (order_id, panels) tuples
+        complete_orders.sort(key=lambda x: x[0])
+        return [(order_id, panels) for _, order_id, panels in complete_orders]
     
     def _update_equipment(self) -> float:
         """Update all equipment and move panels through stages"""
@@ -451,11 +544,16 @@ class PaintBoothEnv(gym.Env):
                 reward -= 2.0
                 panel.defect_probability += 0.1
         
-        # Solvent paint robot
-        completed_panels = self.solvent_paint_robot.get_completed_panels(self.current_time)
+        # Solvent paint robot - check if panels are in paint stage before trying to move them
+        if (self.solvent_varnish_paint_robot.panels and 
+            self.solvent_varnish_paint_robot.panels[0].stage == ProcessStage.PAINT_ROBOT):
+            completed_panels = self.solvent_varnish_paint_robot.get_completed_panels(self.current_time)
+        else:
+            completed_panels = []
+        
         for panel in completed_panels:
             # Choose flash off cabinet with most space
-            flash_off_options = [self.solvent_flash_off_1, self.solvent_flash_off_2]
+            flash_off_options = [self.solvent_varnish_flash_off_1, self.solvent_varnish_flash_off_2]
             best_option = min(flash_off_options, key=lambda x: len(x.panels))
             
             if best_option.can_accept([panel], self.current_time):
@@ -480,8 +578,16 @@ class PaintBoothEnv(gym.Env):
         reward = 0.0
         
         # Water flash off to water oven
-        completed_panels = self.water_flash_off.get_completed_panels(self.current_time)
-        for panel in completed_panels:
+        # First identify completed panels without removing them
+        flash_off_completed = []
+        for panel in self.water_flash_off.panels:
+            if (panel.stage == ProcessStage.FLASH_OFF and 
+                self.current_time >= panel.stage_start_time + panel.stage_duration):
+                flash_off_completed.append(panel)
+        
+        # Try to move each completed panel to water oven
+        successfully_moved = []
+        for panel in flash_off_completed:
             # Calculate quality based on flash off time
             actual_time = self.current_time - panel.stage_start_time
             quality_factor, defect_prob = calculate_quality_factor(actual_time, self.water_flash_off.processing_time)
@@ -491,15 +597,30 @@ class PaintBoothEnv(gym.Env):
             if self.water_oven.can_accept([panel], self.current_time):
                 self.water_oven.add_panels([panel], self.current_time)
                 panel.stage = ProcessStage.OVEN
+                successfully_moved.append(panel)
                 reward += 1.0
             else:
+                # Can't move panel - leave it in flash off for now
                 reward -= 2.0
                 panel.defect_probability += 0.1
         
+        # Remove successfully moved panels from the flash off cabinet
+        for panel in successfully_moved:
+            if panel in self.water_flash_off.panels:
+                self.water_flash_off.panels.remove(panel)
+        
         # Solvent flash off cabinets to solvent ovens
-        for flash_off in [self.solvent_flash_off_1, self.solvent_flash_off_2]:
-            completed_panels = flash_off.get_completed_panels(self.current_time)
-            for panel in completed_panels:
+        for flash_off in [self.solvent_varnish_flash_off_1, self.solvent_varnish_flash_off_2]:
+            # First identify completed panels without removing them
+            flash_off_completed = []
+            for panel in flash_off.panels:
+                if (panel.stage == ProcessStage.FLASH_OFF and 
+                    self.current_time >= panel.stage_start_time + panel.stage_duration):
+                    flash_off_completed.append(panel)
+            
+            # Try to move each completed panel to solvent ovens
+            successfully_moved = []
+            for panel in flash_off_completed:
                 # Calculate quality
                 actual_time = self.current_time - panel.stage_start_time
                 quality_factor, defect_prob = calculate_quality_factor(actual_time, flash_off.processing_time)
@@ -507,22 +628,30 @@ class PaintBoothEnv(gym.Env):
                 panel.defect_probability += defect_prob
                 
                 # Choose oven with most space
-                oven_options = [self.solvent_oven_1, self.solvent_oven_2]
+                oven_options = [self.solvent_varnish_oven_1, self.solvent_varnish_oven_2]
                 best_oven = min(oven_options, key=lambda x: len(x.panels))
                 
                 if best_oven.can_accept([panel], self.current_time):
                     best_oven.add_panels([panel], self.current_time)
                     panel.stage = ProcessStage.OVEN
+                    successfully_moved.append(panel)
                     reward += 1.0
                 else:
                     other_oven = oven_options[1] if best_oven == oven_options[0] else oven_options[0]
                     if other_oven.can_accept([panel], self.current_time):
                         other_oven.add_panels([panel], self.current_time)
                         panel.stage = ProcessStage.OVEN
+                        successfully_moved.append(panel)
                         reward += 1.0
                     else:
+                        # Can't move panel - leave it in flash off for now
                         reward -= 2.0
                         panel.defect_probability += 0.1
+            
+            # Remove successfully moved panels from the flash off cabinet
+            for panel in successfully_moved:
+                if panel in flash_off.panels:
+                    flash_off.panels.remove(panel)
         
         return reward
     
@@ -531,7 +660,8 @@ class PaintBoothEnv(gym.Env):
         reward = 0.0
         
         # Water oven to buffer zone
-        completed_panels = self.water_oven.get_completed_panels(self.current_time)
+        all_completed = self.water_oven.get_completed_panels(self.current_time)
+        completed_panels = [p for p in all_completed if p.stage == ProcessStage.OVEN]
         for panel in completed_panels:
             # Calculate quality
             actual_time = self.current_time - panel.stage_start_time
@@ -542,10 +672,18 @@ class PaintBoothEnv(gym.Env):
             self.buffer_zone.add_panel(panel, self.current_time)
             reward += 2.0
         
-        # Solvent ovens - panels are ready for varnishing
-        for oven in [self.solvent_oven_1, self.solvent_oven_2]:
-            completed_panels = oven.get_completed_panels(self.current_time)
-            for panel in completed_panels:
+        # Solvent ovens to buffer zone - panels are ready for varnishing
+        for oven in [self.solvent_varnish_oven_1, self.solvent_varnish_oven_2]:
+            # First identify completed first-stage oven panels without removing them
+            oven_completed = []
+            for panel in oven.panels:
+                if (panel.stage == ProcessStage.OVEN and 
+                    self.current_time >= panel.stage_start_time + panel.stage_duration):
+                    oven_completed.append(panel)
+            
+            # Process each completed first-stage panel
+            successfully_moved = []
+            for panel in oven_completed:
                 # Calculate quality
                 actual_time = self.current_time - panel.stage_start_time
                 quality_factor, defect_prob = calculate_quality_factor(actual_time, oven.processing_time)
@@ -553,76 +691,128 @@ class PaintBoothEnv(gym.Env):
                 panel.defect_probability += defect_prob
                 
                 self.buffer_zone.add_panel(panel, self.current_time)
+                successfully_moved.append(panel)
                 reward += 2.0
+            
+            # Remove successfully moved panels from the oven
+            for panel in successfully_moved:
+                if panel in oven.panels:
+                    oven.panels.remove(panel)
         
         return reward
     
     def _move_from_varnish_robot(self) -> float:
-        """Move completed panels from varnish robot to varnish flash off"""
+        """Move completed panels from varnish robot (shared solvent robot) to flash off cabinets"""
         reward = 0.0
         
-        completed_panels = self.varnish_robot.get_completed_panels(self.current_time)
-        for panel in completed_panels:
-            # Choose varnish flash off cabinet with most space
-            flash_off_options = [self.varnish_flash_off_1, self.varnish_flash_off_2]
+        # First, identify completed varnish panels (but don't remove them yet)
+        varnish_completed = []
+        for panel in self.solvent_varnish_paint_robot.panels:
+            if (panel.stage == ProcessStage.VARNISH_ROBOT and 
+                self.current_time >= panel.stage_start_time + panel.stage_duration):
+                varnish_completed.append(panel)
+        
+        # Try to move each completed panel to flash off cabinets
+        successfully_moved = []
+        for panel in varnish_completed:
+            # Choose flash off cabinet with most space (shared solvent/varnish equipment)
+            flash_off_options = [self.solvent_varnish_flash_off_1, self.solvent_varnish_flash_off_2]
             best_option = min(flash_off_options, key=lambda x: len(x.panels))
             
             if best_option.can_accept([panel], self.current_time):
                 best_option.add_panels([panel], self.current_time)
                 panel.stage = ProcessStage.VARNISH_FLASH_OFF
+                successfully_moved.append(panel)
                 reward += 1.0
             else:
                 other_option = flash_off_options[1] if best_option == flash_off_options[0] else flash_off_options[0]
                 if other_option.can_accept([panel], self.current_time):
                     other_option.add_panels([panel], self.current_time)
                     panel.stage = ProcessStage.VARNISH_FLASH_OFF
+                    successfully_moved.append(panel)
                     reward += 1.0
                 else:
+                    # Can't move panel - leave it in the robot for now
                     reward -= 2.0
                     panel.defect_probability += 0.1
+        
+        # Remove successfully moved panels from the robot
+        for panel in successfully_moved:
+            if panel in self.solvent_varnish_paint_robot.panels:
+                self.solvent_varnish_paint_robot.panels.remove(panel)
+        
+        # Update robot busy state if empty
+        if not self.solvent_varnish_paint_robot.panels:
+            self.solvent_varnish_paint_robot.busy_until = 0.0
         
         return reward
     
     def _move_from_varnish_flash_off(self) -> float:
-        """Move completed panels from varnish flash off to varnish ovens"""
+        """Move completed panels from varnish flash off (shared) to varnish ovens (shared)"""
         reward = 0.0
         
-        for flash_off in [self.varnish_flash_off_1, self.varnish_flash_off_2]:
-            completed_panels = flash_off.get_completed_panels(self.current_time)
-            for panel in completed_panels:
+        # Use shared solvent flash off cabinets for varnish stage
+        for flash_off in [self.solvent_varnish_flash_off_1, self.solvent_varnish_flash_off_2]:
+            # First identify completed varnish panels without removing them
+            varnish_completed = []
+            for panel in flash_off.panels:
+                if (panel.stage == ProcessStage.VARNISH_FLASH_OFF and 
+                    self.current_time >= panel.stage_start_time + panel.stage_duration):
+                    varnish_completed.append(panel)
+            
+            # Try to move each completed panel to varnish ovens
+            successfully_moved = []
+            for panel in varnish_completed:
                 # Calculate quality
                 actual_time = self.current_time - panel.stage_start_time
                 quality_factor, defect_prob = calculate_quality_factor(actual_time, flash_off.processing_time)
                 panel.quality_factor *= quality_factor
                 panel.defect_probability += defect_prob
                 
-                # Choose varnish oven with most space
-                oven_options = [self.varnish_oven_1, self.varnish_oven_2]
+                # Choose oven with most space (shared solvent/varnish ovens)
+                oven_options = [self.solvent_varnish_oven_1, self.solvent_varnish_oven_2]
                 best_oven = min(oven_options, key=lambda x: len(x.panels))
                 
                 if best_oven.can_accept([panel], self.current_time):
                     best_oven.add_panels([panel], self.current_time)
                     panel.stage = ProcessStage.VARNISH_OVEN
+                    successfully_moved.append(panel)
                     reward += 1.0
                 else:
                     other_oven = oven_options[1] if best_oven == oven_options[0] else oven_options[0]
                     if other_oven.can_accept([panel], self.current_time):
                         other_oven.add_panels([panel], self.current_time)
                         panel.stage = ProcessStage.VARNISH_OVEN
+                        successfully_moved.append(panel)
                         reward += 1.0
                     else:
+                        # Can't move panel - leave it in flash off for now
                         reward -= 2.0
                         panel.defect_probability += 0.1
+            
+            # Remove successfully moved panels from the flash off cabinet
+            for panel in successfully_moved:
+                if panel in flash_off.panels:
+                    flash_off.panels.remove(panel)
         
         return reward
     
     def _move_from_varnish_ovens(self) -> float:
-        """Move completed panels from varnish ovens to completion"""
+        """Move completed panels from varnish ovens (shared) to completion"""
         reward = 0.0
         
-        for oven in [self.varnish_oven_1, self.varnish_oven_2]:
-            completed_panels = oven.get_completed_panels(self.current_time)
-            for panel in completed_panels:
+        # Use shared solvent ovens for varnish stage
+        for oven in [self.solvent_varnish_oven_1, self.solvent_varnish_oven_2]:
+            # First identify completed varnish panels without removing them
+            varnish_completed = []
+            for panel in oven.panels:
+                if (panel.stage == ProcessStage.VARNISH_OVEN and 
+                    self.current_time >= panel.stage_start_time + panel.stage_duration):
+                    varnish_completed.append(panel)
+            
+            # Process each completed varnish panel
+            successfully_processed = []
+            for panel in varnish_completed:
                 # Calculate final quality
                 actual_time = self.current_time - panel.stage_start_time
                 quality_factor, defect_prob = calculate_quality_factor(actual_time, oven.processing_time)
@@ -641,42 +831,14 @@ class PaintBoothEnv(gym.Env):
                     reward += 10.0 * panel.quality_factor  # Reward based on quality
                 
                 panel.stage = ProcessStage.COMPLETE
+                successfully_processed.append(panel)
+            
+            # Remove successfully processed panels from the oven
+            for panel in successfully_processed:
+                if panel in oven.panels:
+                    oven.panels.remove(panel)
         
         return reward
-    
-    def _update_buffer_zone(self):
-        """Update buffer zone and move panels to varnish robot when possible"""
-        buffer_panels = self.buffer_zone.get_panels(self.current_time)
-        
-        # Try to move panels to varnish robot
-        if len(buffer_panels) > 0 and self.varnish_robot.is_available(self.current_time):
-            # Take up to 3 panels (robot capacity) from the same order if possible
-            panels_to_varnish = []
-            
-            # Group panels by order
-            orders_in_buffer = {}
-            for panel in buffer_panels:
-                if panel.order_id not in orders_in_buffer:
-                    orders_in_buffer[panel.order_id] = []
-                orders_in_buffer[panel.order_id].append(panel)
-            
-            # Try to find a complete order or take oldest panels
-            for order_id, panels in orders_in_buffer.items():
-                if len(panels_to_varnish) + len(panels) <= 3:
-                    panels_to_varnish.extend(panels)
-                    if len(panels_to_varnish) == 3:
-                        break
-            
-            # If we don't have a complete order, take oldest panels
-            if len(panels_to_varnish) == 0:
-                sorted_panels = sorted(buffer_panels, key=lambda x: x.stage_start_time)
-                panels_to_varnish = sorted_panels[:min(3, len(sorted_panels))]
-            
-            if panels_to_varnish:
-                self.varnish_robot.add_panels(panels_to_varnish, self.current_time)
-                self.buffer_zone.remove_panels(panels_to_varnish)
-                for panel in panels_to_varnish:
-                    panel.stage = ProcessStage.VARNISH_ROBOT
     
     def _calculate_additional_rewards(self) -> float:
         """Calculate additional rewards based on system performance"""
@@ -703,13 +865,11 @@ class PaintBoothEnv(gym.Env):
         # Current time (normalized)
         obs.append(self.current_time / self.shift_duration)
         
-        # Equipment status
+        # Equipment status (only unique equipment pieces)
         equipment_list = [
-            self.water_paint_robot, self.solvent_paint_robot,
-            self.water_flash_off, self.solvent_flash_off_1, self.solvent_flash_off_2,
-            self.water_oven, self.solvent_oven_1, self.solvent_oven_2,
-            self.varnish_robot, self.varnish_flash_off_1, self.varnish_flash_off_2,
-            self.varnish_oven_1, self.varnish_oven_2
+            self.water_paint_robot, self.solvent_varnish_paint_robot,
+            self.water_flash_off, self.solvent_varnish_flash_off_1, self.solvent_varnish_flash_off_2,
+            self.water_oven, self.solvent_varnish_oven_1, self.solvent_varnish_oven_2
         ]
         
         for equipment in equipment_list:
@@ -739,6 +899,19 @@ class PaintBoothEnv(gym.Env):
         else:
             obs.extend([0.0, 0.0])
         
+        # Complete orders in buffer zone (ready for varnishing)
+        complete_orders = self._get_complete_orders_in_buffer()[:self.max_buffer_orders]
+        for i in range(self.max_buffer_orders):
+            if i < len(complete_orders):
+                order_id, panels = complete_orders[i]
+                obs.append(len(panels) / 3.0)  # Normalized number of panels in order
+                avg_wait = np.mean([self.current_time - p.stage_start_time for p in panels])
+                obs.append(min(1.0, avg_wait / 10.0))  # Normalized average wait time for this order
+                # Determine paint type (all panels in order have same paint type)
+                obs.append(1.0 if panels[0].paint_type == PaintType.WATER else 0.0)
+            else:
+                obs.extend([0.0, 0.0, 0.0])  # Padding for empty buffer order slots
+        
         # Quality metrics
         total_processed = self.total_panels_completed + self.total_panels_defective
         completion_rate = self.total_panels_completed / max(1, total_processed)
@@ -767,14 +940,13 @@ class PaintBoothEnv(gym.Env):
             print("\nEquipment Status:")
             equipment_list = [
                 ("Water Paint Robot", self.water_paint_robot),
-                ("Solvent Paint Robot", self.solvent_paint_robot),
+                ("Solvent/Varnish Robot", self.solvent_varnish_paint_robot),
                 ("Water Flash Off", self.water_flash_off),
-                ("Solvent Flash Off 1", self.solvent_flash_off_1),
-                ("Solvent Flash Off 2", self.solvent_flash_off_2),
+                ("Solvent/Varnish Flash Off 1", self.solvent_varnish_flash_off_1),
+                ("Solvent/Varnish Flash Off 2", self.solvent_varnish_flash_off_2),
                 ("Water Oven", self.water_oven),
-                ("Solvent Oven 1", self.solvent_oven_1),
-                ("Solvent Oven 2", self.solvent_oven_2),
-                ("Varnish Robot", self.varnish_robot),
+                ("Solvent/Varnish Oven 1", self.solvent_varnish_oven_1),
+                ("Solvent/Varnish Oven 2", self.solvent_varnish_oven_2),
             ]
             
             for name, equipment in equipment_list:

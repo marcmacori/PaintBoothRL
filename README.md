@@ -25,9 +25,12 @@ The paint booth environment simulates a complete paint manufacturing process wit
 ## Key Features
 
 ### Equipment Configuration
-- **Paint Robots**: 1 water, 1 solvent (15 min processing, 3 panel capacity)
-- **Flash Off Cabinets**: 1 water, 2 solvent (10 min processing, 12 panel capacity)
-- **Ovens**: 1 water, 2 solvent for stage 1; 2 solvent for varnish stage (9 panel capacity)
+- **Paint Robots**: 1 water, 1 solvent/varnish (shared) (15 min processing, 3 panel capacity)
+  - *Batch processors*: Must be empty to accept new orders, become busy during processing
+- **Flash Off Cabinets**: 1 water, 2 solvent/varnish (shared) (10 min processing, 12 panel capacity)
+  - *Continuous processors*: Can accept new panels anytime up to capacity
+- **Ovens**: 1 water, 2 solvent/varnish (shared) (9 panel capacity)
+  - *Continuous processors*: Can accept new panels anytime up to capacity
 - **Buffer Zone**: 5-minute maximum wait time with quality degradation
 
 ### Quality System
@@ -75,14 +78,16 @@ env.render()
 ## Environment Details
 
 ### Action Space
-- **MultiDiscrete([51, 3])**: 
+- **MultiDiscrete([51, 21])**: 
   - First element: Order selection (0 = no action, 1-50 = order index)
-  - Second element: Equipment selection (when multiple options available)
+  - Second element: Buffer action (0 = no action, 1-20 = move complete order from buffer to varnish)
+  
+**Note**: Equipment selection is automatic based on paint type and equipment availability.
 
 ### Observation Space
-- **Box(0.0, 1.0, (247,))**: Normalized observations including:
+- **Box(0.0, 1.0, (232,))**: Normalized observations including:
   - Current time
-  - Equipment status (11 pieces × 3 features each)
+  - Equipment status (8 unique pieces × 3 features each)
   - Pending orders (50 max × 4 features each)
   - Buffer zone status (3 features)
   - Quality metrics (4 features)
@@ -126,16 +131,6 @@ while not done:
     obs, reward, done, info = env.step(action)
 ```
 
-### Training with Stable-Baselines3
-```python
-from stable_baselines3 import PPO
-from env import PaintBoothEnv
-
-env = PaintBoothEnv()
-model = PPO("MlpPolicy", env, verbose=1)
-model.learn(total_timesteps=100000)
-```
-
 ## Performance Metrics
 
 The environment tracks several key performance indicators:
@@ -163,6 +158,9 @@ The environment tracks several key performance indicators:
 - Realistic capacity limitations
 - Processing time requirements
 - Equipment-specific paint type restrictions
+- **Batch vs Continuous Processing**:
+  - *Batch processors* (Paint Robots): Must complete current job before accepting new work
+  - *Continuous processors* (Flash Off, Ovens): Can accept new panels while processing others
 
 ## File Structure
 
@@ -181,9 +179,11 @@ captone_project/
 - **PaintBoothEnv**: Main gym environment
 - **OrderGenerator**: Generates orders with realistic patterns
 - **Equipment**: Base class for all processing equipment
-- **PaintRobot**: Specialized robot for painting operations
-- **FlashOffCabinet**: Flash off processing equipment
-- **Oven**: Curing oven equipment
+- **BatchProcessor**: Equipment that processes in batches (becomes busy)
+- **ContinuousProcessor**: Equipment that accepts panels continuously
+- **PaintRobot**: Specialized robot for painting operations (batch processor)
+- **FlashOffCabinet**: Flash off processing equipment (continuous processor)
+- **Oven**: Curing oven equipment (continuous processor)
 - **BufferZone**: Temporary storage with quality degradation
 
 ## Future Enhancements
@@ -194,14 +194,9 @@ captone_project/
 - **Maintenance Windows**: Scheduled equipment maintenance
 - **Energy Optimization**: Power consumption modeling
 - **Real-time Adaptation**: Dynamic parameter adjustment
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Submit a pull request
+- **Add more machines**: Allow for easy tweaking of machinery number
+- **Observation space based on machines**: Allow for above point to work
+- ** Machine Selection when Multiple are available**
 
 ## License
 
@@ -209,4 +204,4 @@ This project is part of the PCML AI Imperial capstone project.
 
 ## Contact
 
-For questions or support, please contact the development team.
+This will not be maintaned it is a on time project.
