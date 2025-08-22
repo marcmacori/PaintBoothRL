@@ -196,7 +196,8 @@ captone_project/
 - **Real-time Adaptation**: Dynamic parameter adjustment
 - **Add more machines**: Allow for easy tweaking of machinery number
 - **Observation space based on machines**: Allow for above point to work
-- ** Machine Selection when Multiple are available**
+- **Machine Selection when Multiple are available**
+- **REVIEW README**
 
 ## License
 

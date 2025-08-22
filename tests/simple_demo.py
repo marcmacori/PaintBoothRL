@@ -46,11 +46,12 @@ def main():
         action = agent.select_action(observation, info)
         
         # Take step
-        observation, reward, done, env_info = env.step(action)
+        observation, reward, terminated, truncated, env_info = env.step(action)
+        done = terminated or truncated
         total_reward += reward
         
-        # Print progress every 30 minutes
-        if step % 30 == 0:
+        # Print progress every 10 minutes
+        if step % 10 == 0:
             print(f"Time {env.current_time:3.0f}min: "
                   f"Completed={env_info['completed_panels']:2d}, "
                   f"Defective={env_info['defective_panels']:2d}, "

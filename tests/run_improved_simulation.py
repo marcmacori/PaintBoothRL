@@ -10,7 +10,6 @@ import sys
 import os
 import numpy as np
 from typing import Dict, Any, List
-import matplotlib.pyplot as plt
 from datetime import datetime
 # Add the project root to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -59,7 +58,8 @@ def run_single_episode(env: PaintBoothEnv, agent, render: bool = False, verbose:
                   f"Pending: {info['pending_orders']:2d}, Buffer: {info['buffer_orders']:2d}")
         
         # Take step in environment
-        next_observation, reward, done, env_info = env.step(action)
+        next_observation, reward, terminated, truncated, env_info = env.step(action)
+        done = terminated or truncated
         total_reward += reward
         
         # Track first completion

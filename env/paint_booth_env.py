@@ -239,11 +239,14 @@ class PaintBoothEnv(gym.Env):
     and quality while managing equipment constraints.
     """
     
-    def __init__(self, shift_duration: float = 8.0, time_step: float = 1.0):
+    def __init__(self, shift_duration: float = 8.0, time_step: float = 1.0, render_mode: str = None):
         super(PaintBoothEnv, self).__init__()
         
         # Add metadata for render modes
         self.metadata = {'render_modes': ['human', 'rgb_array']}
+        
+        # Store render mode
+        self.render_mode = render_mode
         
         # Time management
         self.shift_duration = shift_duration * 60  # Convert to minutes
@@ -327,9 +330,9 @@ class PaintBoothEnv(gym.Env):
         # Handle seed for reproducibility
         super().reset(seed=seed)
         if seed is not None:
-            self._np_random = np.random.RandomState(seed)
+            self._np_random = np.random.default_rng(seed)
         else:
-            self._np_random = np.random.RandomState()
+            self._np_random = np.random.default_rng()
         
         self.current_time = 0.0
         
