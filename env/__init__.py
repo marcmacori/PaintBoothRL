@@ -10,7 +10,7 @@ from .paint_booth_env import (
     Oven,
     BufferZone,
     OrderGenerator,
-    calculate_quality_factor
+    calculate_defect_probability
 )
 
 __all__ = [
@@ -25,5 +25,5 @@ __all__ = [
     'Oven',
     'BufferZone',
     'OrderGenerator',
-    'calculate_quality_factor'
+    'calculate_defect_probability'
 ]

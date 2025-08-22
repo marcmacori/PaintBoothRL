@@ -15,8 +15,7 @@ from datetime import datetime
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from env.paint_booth_env import PaintBoothEnv
-from agents.basic_agent import RandomAgent, GreedyAgent, DoNothingAgent
-from agents.smart_agents import ImprovedGreedyAgent, BalancedAgent, AdaptiveAgent, OptimalTimingAgent
+from agents.heuristic_agents import RandomAgent, GreedyAgent, DoNothingAgent
 
 
 def run_single_episode(env: PaintBoothEnv, agent, render: bool = False, verbose: bool = False) -> Dict[str, Any]:
@@ -100,7 +99,6 @@ def run_single_episode(env: PaintBoothEnv, agent, render: bool = False, verbose:
         'total_orders': env_info['total_orders'],
         'completed_panels': env_info['completed_panels'],
         'defective_panels': env_info['defective_panels'],
-        'quality_score': env_info['quality_score'],
         'final_pending_orders': env_info['pending_orders'],
         'final_buffer_orders': env_info['buffer_orders'],
         'completion_rate': completion_rate,
@@ -108,7 +106,7 @@ def run_single_episode(env: PaintBoothEnv, agent, render: bool = False, verbose:
         'throughput': throughput,
         'first_completion_step': completed_at_step,
         'first_completion_time': completed_at_step if completed_at_step is None else completed_at_step,
-        'efficiency_score': env_info['completed_panels'] * env_info['quality_score'] - env_info['defective_panels']
+        'efficiency_score': env_info['completed_panels'] - env_info['defective_panels']  # Simple efficiency based on net completed panels
     }
     
     return episode_stats
@@ -141,7 +139,7 @@ def run_multiple_episodes(env: PaintBoothEnv, agent, num_episodes: int = 3, verb
         if not verbose:
             print(f"  Episode {episode + 1}: Reward: {stats['total_reward']:6.1f}, "
                   f"Completed: {stats['completed_panels']:2d}, Defective: {stats['defective_panels']:2d}, "
-                  f"Quality: {stats['quality_score']:.3f}")
+                  f"Efficiency: {stats['efficiency_score']:.1f}")
     
     return all_stats
 
@@ -177,7 +175,6 @@ def compare_agents(agents: List, num_episodes: int = 3) -> Dict[str, Any]:
             'std_reward': np.std([s['total_reward'] for s in stats_list]),
             'avg_completed': np.mean([s['completed_panels'] for s in stats_list]),
             'avg_defective': np.mean([s['defective_panels'] for s in stats_list]),
-            'avg_quality': np.mean([s['quality_score'] for s in stats_list]),
             'avg_completion_rate': np.mean([s['completion_rate'] for s in stats_list]),
             'avg_defect_rate': np.mean([s['defect_rate'] for s in stats_list]),
             'avg_throughput': np.mean([s['throughput'] for s in stats_list]),
@@ -191,8 +188,8 @@ def compare_agents(agents: List, num_episodes: int = 3) -> Dict[str, Any]:
         print(f"  Average reward: {avg_stats['avg_reward']:8.1f} ± {avg_stats['std_reward']:6.1f}")
         print(f"  Completed panels: {avg_stats['avg_completed']:6.1f}")
         print(f"  Defective panels: {avg_stats['avg_defective']:6.1f}")
-        print(f"  Quality score: {avg_stats['avg_quality']:9.3f}")
         print(f"  Completion rate: {avg_stats['avg_completion_rate']:8.3f}")
+        print(f"  Defect rate: {avg_stats['avg_defect_rate']:11.3f}")
         print(f"  Throughput: {avg_stats['avg_throughput']:11.2f} panels/hour")
         print(f"  Efficiency score: {avg_stats['avg_efficiency']:7.1f}")
         print(f"  Success rate: {avg_stats['successful_episodes']}/{num_episodes} episodes")
@@ -205,7 +202,7 @@ def print_detailed_comparison(results: Dict[str, Any]):
     print("\n" + "="*100)
     print("DETAILED AGENT PERFORMANCE COMPARISON")
     print("="*100)
-    print(f"{'Agent':<25} {'Avg Reward':<12} {'Completed':<10} {'Defective':<10} {'Quality':<8} {'Efficiency':<10} {'Success':<8}")
+    print(f"{'Agent':<25} {'Avg Reward':<12} {'Completed':<10} {'Defective':<10} {'Defect Rate':<12} {'Efficiency':<10} {'Success':<8}")
     print("-"*100)
     
     # Sort agents by efficiency score
@@ -214,7 +211,7 @@ def print_detailed_comparison(results: Dict[str, Any]):
     for agent_name, stats in sorted_agents:
         success_rate = f"{stats['successful_episodes']}/{stats['episodes']}"
         print(f"{agent_name:<25} {stats['avg_reward']:<12.1f} {stats['avg_completed']:<10.1f} "
-              f"{stats['avg_defective']:<10.1f} {stats['avg_quality']:<8.3f} {stats['avg_efficiency']:<10.1f} {success_rate:<8}")
+              f"{stats['avg_defective']:<10.1f} {stats['avg_defect_rate']:<12.3f} {stats['avg_efficiency']:<10.1f} {success_rate:<8}")
     
     print("="*100)
     
@@ -223,7 +220,7 @@ def print_detailed_comparison(results: Dict[str, Any]):
     print(f"\n🏆 BEST PERFORMER: {best_agent[0]}")
     print(f"   Efficiency Score: {best_agent[1]['avg_efficiency']:.1f}")
     print(f"   Success Rate: {best_agent[1]['successful_episodes']}/{best_agent[1]['episodes']}")
-    print(f"   Average Quality: {best_agent[1]['avg_quality']:.3f}")
+    print(f"   Average Defect Rate: {best_agent[1]['avg_defect_rate']:.3f}")
 
 
 def demonstrate_working_environment():
@@ -233,20 +230,13 @@ def demonstrate_working_environment():
     print("="*80)
     
     env = PaintBoothEnv(shift_duration=2.0, time_step=1.0)  # 2-hour demonstration
-    agent = OptimalTimingAgent(shift_duration=2.0)  # Fixed OptimalTimingAgent with correct shift duration
+    agent = GreedyAgent()  # Use GreedyAgent instead of OptimalTimingAgent
     
     print(f"Running single episode with {agent.name}...")
     print(f"Expected completion time: ~90 minutes")
     print(f"Episode duration: 2 hours (120 minutes)")
     
     stats = run_single_episode(env, agent, render=False, verbose=True)
-    
-    print(f"\n🎯 DEMONSTRATION RESULTS:")
-    print(f"   ✅ Environment is fully functional")
-    print(f"   ✅ Panels complete the manufacturing process")
-    print(f"   ✅ Quality system working (avg quality: {stats['quality_score']:.3f})")
-    print(f"   ✅ Agent decisions matter")
-    print(f"   ✅ No more disappearing panels!")
     
     return stats
 
@@ -270,17 +260,11 @@ def main():
     # First, demonstrate the working environment
     demonstrate_working_environment()
     
-    # Create improved agents
+    # Create basic agents
     agents = [
-        # Original agents for comparison
+        RandomAgent(),
         GreedyAgent(),
-        RandomAgent(seed=42),
-        
-        # New improved agents
-        ImprovedGreedyAgent(),
-        BalancedAgent(aggressiveness=0.7),
-        AdaptiveAgent(learning_rate=0.1),
-        OptimalTimingAgent(shift_duration=8.0)
+        DoNothingAgent()
     ]
     
     print(f"\nCreated {len(agents)} agents:")
@@ -302,7 +286,8 @@ def main():
     print(f"\n📊 Performance Analysis:")
     print(f"   🥇 Best Agent: {best_agent[0]} (efficiency: {best_agent[1]['avg_efficiency']:.1f})")
     print(f"   🥉 Baseline: {worst_agent[0]} (efficiency: {worst_agent[1]['avg_efficiency']:.1f})")
-    print(f"   📈 Improvement: {best_agent[1]['avg_efficiency'] - worst_agent[1]['avg_efficiency']:.1f}x better")
+    improvement = best_agent[1]['avg_efficiency'] - worst_agent[1]['avg_efficiency']
+    print(f"   📈 Improvement: +{improvement:.1f} efficiency points")
     
     print(f"\n🔍 Key Insights:")
     successful_agents = [name for name, stats in comparison_results.items() 
@@ -312,23 +297,6 @@ def main():
         print(f"   ✅ {len(successful_agents)} agents achieved 100% success rate:")
         for agent_name in successful_agents:
             print(f"      • {agent_name}")
-    
-    print(f"\n💡 Environment Status:")
-    print(f"   ✅ Panel disappearance bug: FIXED")
-    print(f"   ✅ Full manufacturing pipeline: WORKING")
-    print(f"   ✅ Quality system: FUNCTIONAL")
-    print(f"   ✅ Agent decision impact: CONFIRMED")
-    print(f"   ✅ Multi-stage processing: OPERATIONAL")
-    
-    print(f"\n🚀 Next Steps:")
-    print(f"   • Implement reinforcement learning agents (DQN, PPO, A3C)")
-    print(f"   • Optimize for multiple objectives (throughput, quality, efficiency)")
-    print(f"   • Add more complex scheduling constraints")
-    print(f"   • Experiment with different shift patterns and order distributions")
-    print(f"   • Develop hybrid human-AI scheduling approaches")
-    
-    print(f"\n🎉 The Paint Booth Environment is now ready for advanced AI research!")
-
 
 if __name__ == "__main__":
     main()

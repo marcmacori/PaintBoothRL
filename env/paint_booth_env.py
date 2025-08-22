@@ -30,7 +30,6 @@ class Panel:
     stage: ProcessStage
     stage_start_time: float
     stage_duration: float
-    quality_factor: float = 1.0
     defect_probability: float = 0.0
     order_size: int = 1  # Total number of panels in the original order
 
@@ -132,21 +131,27 @@ class BufferZone:
         self.panels.append(panel)
     
     def get_panels(self, current_time: float) -> List[Panel]:
-        # Update defect probability based on wait time
+        # Update defect probability based on wait time (only once per panel)
         for panel in self.panels:
-            wait_time = current_time - panel.stage_start_time
-            if wait_time > self.max_wait_time:
-                # Remove panels that waited too long (defect)
-                panel.defect_probability = 1.0
-            else:
-                # Increase defect probability based on wait time
-                panel.defect_probability += (wait_time / self.max_wait_time) * 0.1
+            # Only calculate buffer defect once per panel to avoid accumulation bug
+            if not hasattr(panel, '_buffer_defect_calculated'):
+                wait_time = current_time - panel.stage_start_time
+                if wait_time > self.max_wait_time:
+                    # Remove panels that waited too long (defect)
+                    panel.defect_probability = 1.0
+                else:
+                    # Increase defect probability based on wait time (moderate penalty)
+                    panel.defect_probability += (wait_time / self.max_wait_time) * 0.03
+                panel._buffer_defect_calculated = True
         
         return self.panels.copy()
     
     def remove_panels(self, panels_to_remove: List[Panel]):
         for panel in panels_to_remove:
             if panel in self.panels:
+                # Reset buffer defect calculation flag when panel leaves buffer
+                if hasattr(panel, '_buffer_defect_calculated'):
+                    delattr(panel, '_buffer_defect_calculated')
                 self.panels.remove(panel)
 
 class OrderGenerator:
@@ -154,7 +159,7 @@ class OrderGenerator:
     def __init__(self, shift_duration: float = 8.0):  # 8 hour shifts
         self.shift_duration = shift_duration * 60  # Convert to minutes
         self.peak_times = [0, 3.5 * 60, 6.5 * 60]  # Peak times in minutes
-        self.base_rate = 2.0  # Base Poisson rate
+        self.base_rate = 10.0  # Base Poisson rate
         self.peak_multiplier = 3.0  # Multiplier during peaks
         self.panel_id_counter = 0
         self.order_id_counter = 0
@@ -210,24 +215,23 @@ class OrderGenerator:
         
         return orders
     
-def calculate_quality_factor(actual_time: float, optimal_time: float) -> Tuple[float, float]:
-    """Calculate quality factor and defect probability based on timing"""
+def calculate_defect_probability(actual_time: float, optimal_time: float) -> float:
+    """Calculate defect probability based on timing
+    
+    Note: Under-processing (time_ratio < 1.0) cannot occur in this system since
+    panels are only moved when they complete the full processing time.
+    Only optimal processing (time_ratio = 1.0-1.1) and over-processing (time_ratio > 1.1) are possible.
+    """
     time_ratio = actual_time / optimal_time
     
-    if time_ratio < 1.0:
-        # Too little time - increasing chance of defect
-        defect_prob = (1.0 - time_ratio) * 0.5  # Up to 50% defect chance
-        quality_factor = time_ratio
-    elif time_ratio <= 1.1:
-        # Slightly more time - better quality
-        defect_prob = max(0.0, 0.1 - (time_ratio - 1.0) * 0.5)  # Lower defect chance
-        quality_factor = min(1.1, 1.0 + (time_ratio - 1.0) * 0.5)
+    if time_ratio <= 1.1:
+        # Optimal to slightly more time - small but noticeable defect chance
+        defect_prob = max(0.01, 0.015 - (time_ratio - 1.0) * 0.01)
     else:
-        # Too much time - increasing chance of defect
-        defect_prob = (time_ratio - 1.1) * 0.3  # Increasing defect chance
-        quality_factor = max(0.5, 1.1 - (time_ratio - 1.1) * 0.2)
+        # Too much time (over-processing due to bottlenecks) - moderate increase in defect chance
+        defect_prob = 0.01 + (time_ratio - 1.1) * 0.02
     
-    return quality_factor, min(defect_prob, 1.0)
+    return min(defect_prob, 0.5)  # Cap at 50% instead of 100%
 
 
 class PaintBoothEnv(gym.Env):
@@ -280,7 +284,6 @@ class PaintBoothEnv(gym.Env):
         self.total_orders_generated = 0
         self.total_panels_completed = 0
         self.total_panels_defective = 0
-        self.total_quality_score = 0.0
         
         # Define action space
         # Actions: [order_selection, buffer_action]
@@ -309,7 +312,7 @@ class PaintBoothEnv(gym.Env):
             max_pending_orders * 4 +  # Orders * 4 features (paint_type, num_panels, arrival_time, priority)
             3 +  # Buffer zone info (num_panels, avg_wait_time, max_wait_time)
             max_buffer_orders * 3 +  # Buffer orders * 3 features (num_panels, avg_wait_time, paint_type)
-            4   # Quality metrics (completion_rate, defect_rate, avg_quality, throughput)
+            3   # Performance metrics (completion_rate, defect_rate, throughput)
         )
         
         self.observation_space = spaces.Box(
@@ -360,7 +363,6 @@ class PaintBoothEnv(gym.Env):
         self.total_orders_generated = 0
         self.total_panels_completed = 0
         self.total_panels_defective = 0
-        self.total_quality_score = 0.0
         
         observation = self._get_observation()
         info = {}
@@ -371,12 +373,14 @@ class PaintBoothEnv(gym.Env):
         """Execute one time step in the environment"""
         order_selection, buffer_action = action
         
-        # Generate new orders
-        new_orders = self.order_generator.generate_orders(self.current_time, self.time_step)
-        for order in new_orders:
-            if len(self.pending_orders) < self.max_pending_orders:
-                self.pending_orders.append(order)
-                self.total_orders_generated += 1
+        # Generate new orders (stop 1.5 hours before end of shift)
+        time_until_shift_end = self.shift_duration - self.current_time
+        if time_until_shift_end > 90.0:  # 1.5 hours = 90 minutes
+            new_orders = self.order_generator.generate_orders(self.current_time, self.time_step)
+            for order in new_orders:
+                if len(self.pending_orders) < self.max_pending_orders:
+                    self.pending_orders.append(order)
+                    self.total_orders_generated += 1
         
         # Process selected action
         reward = 0.0
@@ -410,7 +414,6 @@ class PaintBoothEnv(gym.Env):
             'total_orders': self.total_orders_generated,
             'completed_panels': self.total_panels_completed,
             'defective_panels': self.total_panels_defective,
-            'quality_score': self.total_quality_score / max(1, self.total_panels_completed),
             'pending_orders': len(self.pending_orders),
             'buffer_orders': len(self._get_complete_orders_in_buffer())
         }
@@ -545,7 +548,7 @@ class PaintBoothEnv(gym.Env):
             else:
                 # Penalty for bottleneck
                 reward -= 2.0
-                panel.defect_probability += 0.1
+                panel.defect_probability += 0.02
         
         # Solvent paint robot - check if panels are in paint stage before trying to move them
         if (self.solvent_varnish_paint_robot.panels and 
@@ -572,7 +575,7 @@ class PaintBoothEnv(gym.Env):
                     reward += 1.0
                 else:
                     reward -= 2.0
-                    panel.defect_probability += 0.1
+                    panel.defect_probability += 0.02
         
         return reward
     
@@ -591,10 +594,9 @@ class PaintBoothEnv(gym.Env):
         # Try to move each completed panel to water oven
         successfully_moved = []
         for panel in flash_off_completed:
-            # Calculate quality based on flash off time
+            # Calculate defect probability based on flash off time
             actual_time = self.current_time - panel.stage_start_time
-            quality_factor, defect_prob = calculate_quality_factor(actual_time, self.water_flash_off.processing_time)
-            panel.quality_factor *= quality_factor
+            defect_prob = calculate_defect_probability(actual_time, self.water_flash_off.processing_time)
             panel.defect_probability += defect_prob
             
             if self.water_oven.can_accept([panel], self.current_time):
@@ -605,7 +607,7 @@ class PaintBoothEnv(gym.Env):
             else:
                 # Can't move panel - leave it in flash off for now
                 reward -= 2.0
-                panel.defect_probability += 0.1
+                panel.defect_probability += 0.02
         
         # Remove successfully moved panels from the flash off cabinet
         for panel in successfully_moved:
@@ -624,10 +626,9 @@ class PaintBoothEnv(gym.Env):
             # Try to move each completed panel to solvent ovens
             successfully_moved = []
             for panel in flash_off_completed:
-                # Calculate quality
+                # Calculate defect probability
                 actual_time = self.current_time - panel.stage_start_time
-                quality_factor, defect_prob = calculate_quality_factor(actual_time, flash_off.processing_time)
-                panel.quality_factor *= quality_factor
+                defect_prob = calculate_defect_probability(actual_time, flash_off.processing_time)
                 panel.defect_probability += defect_prob
                 
                 # Choose oven with most space
@@ -649,7 +650,7 @@ class PaintBoothEnv(gym.Env):
                     else:
                         # Can't move panel - leave it in flash off for now
                         reward -= 2.0
-                        panel.defect_probability += 0.1
+                        panel.defect_probability += 0.02
             
             # Remove successfully moved panels from the flash off cabinet
             for panel in successfully_moved:
@@ -666,10 +667,9 @@ class PaintBoothEnv(gym.Env):
         all_completed = self.water_oven.get_completed_panels(self.current_time)
         completed_panels = [p for p in all_completed if p.stage == ProcessStage.OVEN]
         for panel in completed_panels:
-            # Calculate quality
+            # Calculate defect probability
             actual_time = self.current_time - panel.stage_start_time
-            quality_factor, defect_prob = calculate_quality_factor(actual_time, self.water_oven.processing_time)
-            panel.quality_factor *= quality_factor
+            defect_prob = calculate_defect_probability(actual_time, self.water_oven.processing_time)
             panel.defect_probability += defect_prob
             
             self.buffer_zone.add_panel(panel, self.current_time)
@@ -687,10 +687,9 @@ class PaintBoothEnv(gym.Env):
             # Process each completed first-stage panel
             successfully_moved = []
             for panel in oven_completed:
-                # Calculate quality
+                # Calculate defect probability
                 actual_time = self.current_time - panel.stage_start_time
-                quality_factor, defect_prob = calculate_quality_factor(actual_time, oven.processing_time)
-                panel.quality_factor *= quality_factor
+                defect_prob = calculate_defect_probability(actual_time, oven.processing_time)
                 panel.defect_probability += defect_prob
                 
                 self.buffer_zone.add_panel(panel, self.current_time)
@@ -737,7 +736,7 @@ class PaintBoothEnv(gym.Env):
                 else:
                     # Can't move panel - leave it in the robot for now
                     reward -= 2.0
-                    panel.defect_probability += 0.1
+                    panel.defect_probability += 0.02
         
         # Remove successfully moved panels from the robot
         for panel in successfully_moved:
@@ -766,10 +765,9 @@ class PaintBoothEnv(gym.Env):
             # Try to move each completed panel to varnish ovens
             successfully_moved = []
             for panel in varnish_completed:
-                # Calculate quality
+                # Calculate defect probability
                 actual_time = self.current_time - panel.stage_start_time
-                quality_factor, defect_prob = calculate_quality_factor(actual_time, flash_off.processing_time)
-                panel.quality_factor *= quality_factor
+                defect_prob = calculate_defect_probability(actual_time, flash_off.processing_time)
                 panel.defect_probability += defect_prob
                 
                 # Choose oven with most space (shared solvent/varnish ovens)
@@ -791,7 +789,7 @@ class PaintBoothEnv(gym.Env):
                     else:
                         # Can't move panel - leave it in flash off for now
                         reward -= 2.0
-                        panel.defect_probability += 0.1
+                        panel.defect_probability += 0.02
             
             # Remove successfully moved panels from the flash off cabinet
             for panel in successfully_moved:
@@ -816,22 +814,21 @@ class PaintBoothEnv(gym.Env):
             # Process each completed varnish panel
             successfully_processed = []
             for panel in varnish_completed:
-                # Calculate final quality
+                # Calculate final defect probability
                 actual_time = self.current_time - panel.stage_start_time
-                quality_factor, defect_prob = calculate_quality_factor(actual_time, oven.processing_time)
-                panel.quality_factor *= quality_factor
+                defect_prob = calculate_defect_probability(actual_time, oven.processing_time)
                 panel.defect_probability += defect_prob
                 
                 # Determine if panel is defective
                 if np.random.random() < panel.defect_probability:
                     self.defective_panels.append(panel)
                     self.total_panels_defective += 1
-                    reward -= 5.0  # Penalty for defective panel
+                    # Penalty should reflect full reprocessing cost
+                    reward -= 35.0  # Penalty for defective panel (reprocessing + waste cost)
                 else:
                     self.completed_panels.append(panel)
                     self.total_panels_completed += 1
-                    self.total_quality_score += panel.quality_factor
-                    reward += 10.0 * panel.quality_factor  # Reward based on quality
+                    reward += 10.0  # Reward for completed panel
                 
                 panel.stage = ProcessStage.COMPLETE
                 successfully_processed.append(panel)
@@ -847,17 +844,17 @@ class PaintBoothEnv(gym.Env):
         """Calculate additional rewards based on system performance"""
         reward = 0.0
         
-        # Penalty for keeping orders waiting too long
+        # Small penalty for keeping orders waiting too long (reduced scale)
         for order in self.pending_orders:
             wait_time = self.current_time - order.arrival_time
             if wait_time > 60:  # More than 1 hour
-                reward -= 0.1 * (wait_time - 60)
+                reward -= 0.001 * (wait_time - 60) 
         
-        # Penalty for panels waiting too long in buffer
+        # Small penalty for panels waiting too long in buffer (reduced scale)
         for panel in self.buffer_zone.panels:
             wait_time = self.current_time - panel.stage_start_time
             if wait_time > 5:  # More than 5 minutes
-                reward -= 1.0
+                reward -= 0.01  
         
         return reward
     
@@ -915,14 +912,13 @@ class PaintBoothEnv(gym.Env):
             else:
                 obs.extend([0.0, 0.0, 0.0])  # Padding for empty buffer order slots
         
-        # Quality metrics
+        # Performance metrics
         total_processed = self.total_panels_completed + self.total_panels_defective
         completion_rate = self.total_panels_completed / max(1, total_processed)
         defect_rate = self.total_panels_defective / max(1, total_processed)
-        avg_quality = self.total_quality_score / max(1, self.total_panels_completed)
         throughput = total_processed / max(1, self.current_time / 60.0)  # Panels per hour
         
-        obs.extend([completion_rate, defect_rate, avg_quality, min(1.0, throughput / 20.0)])
+        obs.extend([completion_rate, defect_rate, min(1.0, throughput / 20.0)])
         
         return np.array(obs, dtype=np.float32)
     
@@ -933,11 +929,6 @@ class PaintBoothEnv(gym.Env):
             print(f"Pending Orders: {len(self.pending_orders)}")
             print(f"Completed Panels: {self.total_panels_completed}")
             print(f"Defective Panels: {self.total_panels_defective}")
-            
-            if self.total_panels_completed > 0:
-                avg_quality = self.total_quality_score / self.total_panels_completed
-                print(f"Average Quality: {avg_quality:.2f}")
-            
             print(f"Buffer Zone: {len(self.buffer_zone.panels)} panels")
             
             print("\nEquipment Status:")
