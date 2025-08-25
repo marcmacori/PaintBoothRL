@@ -13,8 +13,8 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from environment.core import DynamicOvenBatchingEnv
 from agents.ppo_agent import BasicPPOAgent
-
 from agents.random_agent import RandomAgent
+from agents.fifo_agent import FIFOAgent
 
 
 def main():
@@ -27,14 +27,14 @@ def main():
         'num_ovens': 2,
         'oven_capacity': 9,
         'batch_time': 10.0,
-        'batch_energy_cost': 5.0,
+        'batch_energy_cost': 9.0,
         'heating_time': 5.0,
-        'cooling_rate': 0.01,
+        'cooling_rate': 0.1,
         'horizon': 1440.0,
-        'arrival_rate': 0.5,
-        'due_date_offset_mean': 60.0,
+        'arrival_rate': 4,
+        'due_date_offset_mean': 120.0,
         'due_date_offset_std': 20.0,
-        'energy_alpha': 0.3,  # Energy penalty multiplier
+        'energy_alpha': 2.0,  # Energy penalty multiplier
         'lateness_beta': 1.0,  # Lateness penalty multiplier
         'use_dynamic_arrivals': True,
         'time_step': 1.0
@@ -43,7 +43,7 @@ def main():
     print(f"Environment created with {env.unwrapped.num_ovens} ovens")
     
     # Training parameters - increased for better learning
-    total_timesteps = 500000  # Increased significantly
+    total_timesteps = 1.440 * 10**6  # Increased significantly
     num_evaluation_episodes = 10  # Reduced for faster evaluation
     
     # Directories
@@ -68,11 +68,13 @@ def main():
     
     # Create other agents
     random_agent = RandomAgent(env)
+    fifo_agent = FIFOAgent(env)
     
     # Evaluate all agents
     agents = {
         'PPO': ppo_agent,
-        'Random': random_agent
+        'Random': random_agent,
+        'FIFO': fifo_agent
     }
     
     all_results = {}

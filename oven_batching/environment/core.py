@@ -174,7 +174,7 @@ class DynamicOvenBatchingEnv(gym.Env):
                  num_ovens: int = 1,
                  oven_capacity: int = 9,
                  batch_time: float = 10.0,
-                 batch_energy_cost: float = 1.0,
+                 batch_energy_cost: float = 9.0,
                  heating_time: float = 15.0,
                  cooling_rate: float = 0.1,
                  horizon: float = 1440.0,
@@ -182,7 +182,7 @@ class DynamicOvenBatchingEnv(gym.Env):
                  due_date_offset_mean: float = 60.0,
                  due_date_offset_std: float = 20.0,
                  energy_alpha: float = 1.0,
-                 lateness_beta: float = 2.0,
+                 lateness_beta: float = 1.0,
                  use_dynamic_arrivals: bool = True,
                  time_step: float = 1.0,
                  seed: Optional[int] = None):
@@ -331,7 +331,7 @@ class DynamicOvenBatchingEnv(gym.Env):
             urgent_jobs = 0
         
         # Normalization constants
-        max_queue_length = 50  # Reasonable upper bound for queue length
+        max_queue_length = 100  # Reasonable upper bound for queue length
         max_lateness_risk = 180.0  # 3 hours max lateness risk
         max_urgent_jobs = 20  # Reasonable upper bound for urgent jobs
 
@@ -393,7 +393,7 @@ class DynamicOvenBatchingEnv(gym.Env):
     def _process_arrivals(self):
         """Process any job arrivals at the current time"""
         # Check if it's time for a new arrival
-        if self.current_time >= self.next_arrival_time and len(self.queue) <= 50:
+        if self.current_time >= self.next_arrival_time and len(self.queue) <= 100:
             due_date_offset = self._generate_due_date_offset()
             job = Job(
                 id=self.job_counter,
@@ -408,7 +408,7 @@ class DynamicOvenBatchingEnv(gym.Env):
     def _process_oven_completions(self):
         """Process any oven completions at the current time"""
         completed_jobs = []
-        
+
         for oven in self.ovens:
             # Update temperature for all ovens
             oven.update_temperature(self.current_time)
@@ -546,14 +546,16 @@ class DynamicOvenBatchingEnv(gym.Env):
             success = oven.start_batch(jobs_to_process, self.current_time)
             if success:
                 current_tariff = self._generate_tariff(self.current_time)
-                energy_cost = self.batch_energy_cost * current_tariff
-                self.total_energy_cost += energy_cost
+                energy_cost = self.energy_alpha * self.batch_energy_cost * current_tariff 
 
                 # Immediate positive reward for launching jobs
-                launch_reward = 0.2 * len(jobs_to_process)
+                launch_reward = 0.1 * len(jobs_to_process)
 
                 # Small penalty for energy cost (normalized)
-                energy_cost_penalty = -0.1 * (energy_cost / (self.batch_energy_cost * 1.5))
+                energy_cost_penalty = -(energy_cost / (self.batch_energy_cost * 1.5))
+
+                # Add energy cost to total energy cost
+                self.total_energy_cost += energy_cost_penalty
             else:
                 action_validation_reward = -0.1
 
@@ -562,14 +564,16 @@ class DynamicOvenBatchingEnv(gym.Env):
             prev_temp = oven.temperature
             if oven.start_heating(self.current_time):
                 current_tariff = self._generate_tariff(self.current_time)
-                heating_cost = self.energy_alpha * self.batch_energy_cost * current_tariff
-                self.total_energy_cost += heating_cost
+                heating_cost = self.energy_alpha * self.batch_energy_cost * self.heating_time /self.batch_time * current_tariff
 
                 # Reward progress towards operating temperature
                 heating_reward = (1.0 - prev_temp)
 
                 # Small penalty for cost
-                energy_cost_penalty = -heating_cost / (self.batch_energy_cost * 1.5)
+                energy_cost_penalty = - (heating_cost / (self.batch_energy_cost * 1.5))
+
+                # Add energy cost to total energy cost
+                self.total_energy_cost += energy_cost_penalty
             else:
                 action_validation_reward = -0.1
 
@@ -578,7 +582,7 @@ class DynamicOvenBatchingEnv(gym.Env):
                 ready_ovens = [oven for oven in self.ovens if oven.is_ready_to_start()]
                 if ready_ovens:
                     # Penalty scaled by queue length
-                    wait_reward = -np.tanh(len(self.queue) / 50.0)
+                    wait_reward = -np.tanh(len(self.queue) / 100.0)
 
         # ===== ADVANCE TIME =====
         self._advance_time()
@@ -597,7 +601,7 @@ class DynamicOvenBatchingEnv(gym.Env):
             if job.is_late():
                 lateness = job.calculate_lateness()
                 scaled_reward = max(0.1, 1.0 - lateness / self.due_date_offset_mean)
-                completion_reward += scaled_reward
+                completion_reward += scaled_reward * self.lateness_beta
                 self.total_lateness_penalty += (1.0 - scaled_reward)
             else:
                 completion_reward += 1.0

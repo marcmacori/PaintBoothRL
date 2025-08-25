@@ -34,6 +34,8 @@ def print_action_help():
     print("  'h' = Show this help")
     print("  's' = Show current state")
     print("  'a' = Show available actions")
+    print("\nNote: Invalid actions are allowed for debugging!")
+    print("Invalid actions will result in action_validation_reward = -0.1")
     print("="*60)
 
 
@@ -136,7 +138,7 @@ def print_available_actions(env):
 
 
 def get_valid_action(env):
-    """Get and validate user action input"""
+    """Get user action input (allows invalid actions for debugging)"""
     while True:
         try:
             action_input = input("\nEnter action (or 'h' for help, 'q' to quit): ").strip().lower()
@@ -161,11 +163,11 @@ def get_valid_action(env):
             oven_id = int(parts[1])
             num_panels = int(parts[2])
             
-            # Validate action
-            if not env._is_action_valid(action_type, oven_id, num_panels):
-                print("Error: Invalid action for current state")
-                print_available_actions(env)
-                continue
+            # Check if action is valid but don't prevent it
+            is_valid = env._is_action_valid(action_type, oven_id, num_panels)
+            if not is_valid:
+                print("Warning: This action is invalid for the current state, but proceeding anyway...")
+                print("Expected behavior: action_validation_reward should be -0.1")
             
             return np.array([action_type, oven_id, num_panels])
             
@@ -186,15 +188,15 @@ def main():
         'num_ovens': 1,
         'oven_capacity': 9,
         'batch_time': 10.0,
-        'batch_energy_cost': 5.0,
+        'batch_energy_cost': 9.0,
         'heating_time': 5.0,
-        'cooling_rate': 0.05,
+        'cooling_rate': 0.1,
         'horizon': 1440.0,
-        'arrival_rate': 0.5,
+        'arrival_rate': 0.8,
         'due_date_offset_mean': 60.0,
         'due_date_offset_std': 20.0,
-        'energy_alpha': 0.3,
-        'lateness_beta': 1.0,
+        'energy_alpha': 10.0,  # Energy penalty multiplier
+        'lateness_beta': 1.0,  # Lateness penalty multiplier
         'use_dynamic_arrivals': True,
         'time_step': 1.0
     }
