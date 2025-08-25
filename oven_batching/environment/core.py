@@ -26,6 +26,8 @@ class Job:
     arrival_time: float
     due_date: float
     completion_time: Optional[float] = None
+    counted_as_late: bool = False
+    completed: bool = False
     
     def is_late(self) -> bool:
         """Check if the job is completed after its due date"""
@@ -88,7 +90,7 @@ class Oven:
             # Exponential cooling: T = T0 * exp(-cooling_rate * elapsed)
             elapsed = current_time - self.idle_start_time
             if elapsed > 5.0:
-                self.temperature = max(0.0, self.temperature * np.exp(-self.cooling_rate * elapsed))
+                self.temperature = max(0.0, self.temperature * np.exp(-self.cooling_rate * (elapsed - 5.0)))
             
                 if self.temperature <= 0.01:  # Consider cold when below 1%
                     self.temperature = 0.0
@@ -126,6 +128,7 @@ class Oven:
         
         for job in self.current_batch_jobs:
             job.completion_time = current_time
+            job.completed = True
         
         completed_jobs = self.current_batch_jobs.copy()
         self.current_batch_jobs = []
@@ -220,8 +223,8 @@ class DynamicOvenBatchingEnv(gym.Env):
             oven_capacity + 1     # Number of panels (0 to oven_capacity)
         ])
         
-        obs_dim = 7 + 6 * num_ovens  # 7 global + 6 per oven (busy, heating, cooling, time_to_completion, time_to_ready, temperature)
-        self.observation_space = spaces.Box(low=0.0, high=np.inf, shape=(obs_dim,), dtype=np.float32)
+        obs_dim = 6 + 6 * num_ovens  # 7 global + 6 per oven (busy, heating, cooling, time_to_completion, time_to_ready, temperature)
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32)
         
         # Initialize state
         self.current_time = 0.0
@@ -231,17 +234,17 @@ class DynamicOvenBatchingEnv(gym.Env):
         self.total_reward = 0.0
         self.total_energy_cost = 0.0
         self.total_lateness_penalty = 0.0
-        self.late_jobs_count = 0  # Track number of late jobs
+        self.late_jobs_count = 0 
     
     def _generate_tariff(self, time: float) -> float:
         """Generate energy tariff based on time of day"""
         hour = (time % 1440) / 60  # Convert to hours
-        if 8 <= hour <= 18:  # Peak hours
+        if 8 <= hour <= 12:  # Peak hours
             return 1.5
-        elif 6 <= hour <= 8 or 18 <= hour <= 22:  # Shoulder hours
-            return 1.2
+        elif 6 <= hour <= 8 or 12 <= hour <= 22:  # Shoulder hours
+            return 1.0
         else:  # Off-peak hours
-            return 0.8
+            return 0.5
     
     def _get_dynamic_arrival_rate(self, time: float) -> float:
         """
@@ -307,7 +310,7 @@ class DynamicOvenBatchingEnv(gym.Env):
         return self.rng.normal(self.due_date_offset_mean, self.due_date_offset_std)
     
     def _get_state_vector(self) -> np.ndarray:
-        """Get the current state as a vector"""
+        """Get the current state as a vector with normalized observations"""
         # Calculate queue statistics
         if self.queue:
             waiting_times = [self.current_time - job.arrival_time for job in self.queue]
@@ -321,33 +324,35 @@ class DynamicOvenBatchingEnv(gym.Env):
                 if time_to_due < 30:  # Jobs due within 30 minutes are urgent
                     urgent_jobs += 1
             
-            min_lateness_risk = min(lateness_risks) if lateness_risks else 0
             max_lateness_risk = max(lateness_risks) if lateness_risks else 0
         else:
             avg_waiting_time = 0.0
-            min_lateness_risk = 0.0
             max_lateness_risk = 0.0
             urgent_jobs = 0
         
-        # Build state vector
+        # Normalization constants
+        max_queue_length = 50  # Reasonable upper bound for queue length
+        max_lateness_risk = 180.0  # 3 hours max lateness risk
+        max_urgent_jobs = 20  # Reasonable upper bound for urgent jobs
+
+        # Build normalized state vector
         state = [
-            self.current_time / self.horizon,  # Normalized time
-            len(self.queue),  # Queue length
-            avg_waiting_time,
-            min_lateness_risk,
-            max_lateness_risk,
-            urgent_jobs,
-            self._generate_tariff(self.current_time)
+        self.current_time / self.horizon,
+        np.tanh(len(self.queue) / max_queue_length),
+        np.tanh(avg_waiting_time / self.due_date_offset_mean),
+        np.tanh(max_lateness_risk / self.due_date_offset_mean),
+        np.tanh(urgent_jobs / max_urgent_jobs),
+        self._generate_tariff(self.current_time) / 1.5,
         ]
         
-        # Add oven information
+        # Add normalized oven information
         for oven in self.ovens:
-            state.append(1.0 if oven.status == OvenStatus.BUSY else 0.0)
-            state.append(1.0 if oven.status == OvenStatus.HEATING else 0.0)
-            state.append(1.0 if oven.status == OvenStatus.IDLE and oven.temperature < 1.0 else 0.0)  # Cooling indicator
-            state.append(oven.get_time_to_completion(self.current_time))
-            state.append(oven.get_time_to_ready(self.current_time))
-            state.append(oven.temperature)  # Add temperature information
+            state.append(1.0 if oven.status == OvenStatus.BUSY else 0.0)  
+            state.append(1.0 if oven.status == OvenStatus.HEATING else 0.0)  
+            state.append(1.0 if oven.status == OvenStatus.IDLE and oven.temperature < 1.0 else 0.0)  
+            state.append(np.tanh(oven.get_time_to_completion(self.current_time) / (self.batch_time + self.heating_time))) 
+            state.append(np.tanh(oven.get_time_to_ready(self.current_time) / self.heating_time))
+            state.append(oven.temperature)
         
         return np.array(state, dtype=np.float32)
     
@@ -388,7 +393,7 @@ class DynamicOvenBatchingEnv(gym.Env):
     def _process_arrivals(self):
         """Process any job arrivals at the current time"""
         # Check if it's time for a new arrival
-        if self.current_time >= self.next_arrival_time:
+        if self.current_time >= self.next_arrival_time and len(self.queue) <= 50:
             due_date_offset = self._generate_due_date_offset()
             job = Job(
                 id=self.job_counter,
@@ -402,6 +407,8 @@ class DynamicOvenBatchingEnv(gym.Env):
     
     def _process_oven_completions(self):
         """Process any oven completions at the current time"""
+        completed_jobs = []
+        
         for oven in self.ovens:
             # Update temperature for all ovens
             oven.update_temperature(self.current_time)
@@ -411,16 +418,13 @@ class DynamicOvenBatchingEnv(gym.Env):
                 completed_jobs = oven.complete_batch(self.current_time)
                 self.completed_jobs.extend(completed_jobs)
                 for job in completed_jobs:
-                    if job.is_late():
+                    if job.is_late() and not job.counted_as_late:
                         self.late_jobs_count += 1
+                        job.counted_as_late = True
+        return completed_jobs
     
     def _is_action_valid(self, action_type: int, oven_id: int, num_panels: int) -> bool:
         """Check if an action is valid and can be executed"""
-        # Basic bounds checking
-        if (action_type < 0 or action_type >= 3 or 
-            oven_id < 0 or oven_id >= len(self.ovens) or
-            num_panels < 0 or num_panels > self.oven_capacity):
-            return False
         
         # Action-specific validation
         if action_type == 1:  # Launch action
@@ -454,14 +458,14 @@ class DynamicOvenBatchingEnv(gym.Env):
         self.total_reward = 0.0
         self.total_energy_cost = 0.0
         self.total_lateness_penalty = 0.0
-        self.late_jobs_count = 0  # Track number of late jobs
+        self.late_jobs_count = 0 
         
         # Reset ovens
         for oven in self.ovens:
             oven.status = OvenStatus.IDLE
             oven.completion_time = 0.0
             oven.current_batch_jobs = []
-            oven.temperature = 0.0  # Start cold
+            oven.temperature = 0.0
             oven.heating_start_time = 0.0
             oven.cooling_start_time = 0.0
         
@@ -482,26 +486,35 @@ class DynamicOvenBatchingEnv(gym.Env):
         return observation, info
     
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
-        """Take a step in the environment"""
+        """Take a step in the environment with shaped rewards"""
         if not self.action_space.contains(action):
             raise ValueError(f"Invalid action: {action}")
         
         action_type, oven_id, num_panels = action
         
-        # Initialize reward
-        reward = 0.0
-        
+        # Initialize reward components by type
+        action_validation_reward = 0.0
+        launch_reward = 0.0
+        heating_reward = 0.0
+        wait_reward = 0.0
+        energy_cost_penalty = 0.0
+        lateness_penalty = 0.0
+        completion_reward = 0.0
+
         # ===== ACTION VALIDATION =====
         if not self._is_action_valid(action_type, oven_id, num_panels):
-            # Invalid action - apply penalty and skip execution
-            reward = -1.0  # Direct penalty for invalid action
-            self.total_reward += reward
-            
-            # Advance time and process events even for invalid actions
-            time_advanced = self._advance_time()
+            action_validation_reward = -0.1  # penalty for invalid action
+
+            # advance time anyway
+            self._advance_time()
             self._process_arrivals()
             self._process_oven_completions()
-            
+
+            # Sum all rewards
+            reward = (action_validation_reward + launch_reward + heating_reward + 
+                     wait_reward + energy_cost_penalty + lateness_penalty + completion_reward)
+            self.total_reward += reward
+
             observation = self._get_state_vector()
             info = {
                 'queue_length': len(self.queue),
@@ -511,95 +524,93 @@ class DynamicOvenBatchingEnv(gym.Env):
                 'total_lateness_penalty': self.total_lateness_penalty,
                 'current_time': self.current_time,
                 'action_mask': self._get_action_mask(),
-                'late_jobs_count': self.late_jobs_count
+                'late_jobs_count': self.late_jobs_count,
+                'action_validation_reward': action_validation_reward,
+                'launch_reward': launch_reward,
+                'heating_reward': heating_reward,
+                'wait_reward': wait_reward,
+                'energy_cost_penalty': energy_cost_penalty,
+                'lateness_penalty': lateness_penalty,
+                'completion_reward': completion_reward
             }
-            
             terminated = self.current_time >= self.horizon
             truncated = False
-            
             return observation, reward, terminated, truncated, info
-        
+
         # ===== VALID ACTION EXECUTION =====
-        # Execute the valid action
         if action_type == 1:  # Launch action
             oven = self.ovens[oven_id]
             jobs_to_process = self.queue[:num_panels]
             self.queue = self.queue[num_panels:]
-            
+
             success = oven.start_batch(jobs_to_process, self.current_time)
             if success:
-                # Energy Cost (Launch)
                 current_tariff = self._generate_tariff(self.current_time)
                 energy_cost = self.batch_energy_cost * current_tariff
                 self.total_energy_cost += energy_cost
-                
-                # Positive reward for launch action, adjusted by tariff timing
-                # Higher reward for actions during lower tariff periods
-                base_launch_reward = 2.0
-                tariff_factor = 1.0 / current_tariff  # Inverse relationship: lower tariff = higher reward
-                launch_reward = base_launch_reward * tariff_factor
-                reward += launch_reward
-                
-                # Still apply energy cost penalty but reduced
-                reward -= self.energy_alpha * energy_cost * 0.5
+
+                # Immediate positive reward for launching jobs
+                launch_reward = 0.2 * len(jobs_to_process)
+
+                # Small penalty for energy cost (normalized)
+                energy_cost_penalty = -0.1 * (energy_cost / (self.batch_energy_cost * 1.5))
             else:
-                # This shouldn't happen with proper validation, but handle it
-                reward += -1.0  # Direct penalty for failed batch start
-                
+                action_validation_reward = -0.1
+
         elif action_type == 2:  # Heating action
             oven = self.ovens[oven_id]
+            prev_temp = oven.temperature
             if oven.start_heating(self.current_time):
-                # Energy Cost (Heating)
                 current_tariff = self._generate_tariff(self.current_time)
-                heating_cost = self.batch_energy_cost * 0.1 * current_tariff
+                heating_cost = self.energy_alpha * self.batch_energy_cost * current_tariff
                 self.total_energy_cost += heating_cost
-                
-                # Positive reward for heating action, adjusted by tariff timing
-                # Higher reward for actions during lower tariff periods
-                base_heating_reward = 1.0
-                tariff_factor = 1.0 / current_tariff  # Inverse relationship: lower tariff = higher reward
-                heating_reward = base_heating_reward * tariff_factor
-                reward += heating_reward
-                
-                # Still apply energy cost penalty but reduced
-                reward -= self.energy_alpha * heating_cost * 0.5
-            else:
-                # This shouldn't happen with proper validation, but handle it
-                reward += -1.0  # Direct penalty for failed heating start
-        
-        # Idle Penalty (when jobs are available and ovens are ready)
-        if action_type == 0 and len(self.queue) > 0:
-            # Check if any oven is ready to process
-            ready_ovens = [oven for oven in self.ovens if oven.is_ready_to_start()]
-            if ready_ovens:
-                reward += -0.01  # Small penalty for being idle when ovens are ready
-        
-        # Advance time by fixed step (after processing events)
-        time_advanced = self._advance_time()
-        # Process events at current time
-        self._process_arrivals()
-        self._process_oven_completions()
 
-        # ===== POSITIVE REWARDS =====
-        # Job Completion Rewards - only process jobs that completed in this timestep
-        newly_completed_jobs = [job for job in self.completed_jobs if job.completion_time == self.current_time]
-        
-        for job in newly_completed_jobs:
-            reward += 5.0  # Reward for processing a job
-            
+                # Reward progress towards operating temperature
+                heating_reward = (1.0 - prev_temp)
+
+                # Small penalty for cost
+                energy_cost_penalty = -heating_cost / (self.batch_energy_cost * 1.5)
+            else:
+                action_validation_reward = -0.1
+
+        elif action_type == 0:  # Wait action
+            if len(self.queue) > 0:
+                ready_ovens = [oven for oven in self.ovens if oven.is_ready_to_start()]
+                if ready_ovens:
+                    # Penalty scaled by queue length
+                    wait_reward = -np.tanh(len(self.queue) / 50.0)
+
+        # ===== ADVANCE TIME =====
+        self._advance_time()
+        self._process_arrivals()
+        completed_jobs = self._process_oven_completions()
+
+        # ===== LATE JOB PENALTY (dense) =====
+        lateness_penalty_sum = sum(max(0, self.current_time - job.due_date) for job in self.queue)
+        if lateness_penalty_sum > 0:
+            step_penalty = np.tanh(lateness_penalty_sum / self.due_date_offset_mean)
+            lateness_penalty = -step_penalty
+            self.total_lateness_penalty += step_penalty
+
+        # ===== COMPLETION REWARDS =====
+        for job in completed_jobs:
             if job.is_late():
-                # Lateness Penalty - only apply once when job completes
                 lateness = job.calculate_lateness()
-                lateness_penalty = self.lateness_beta * lateness
-                self.total_lateness_penalty += lateness_penalty
-                reward -= lateness_penalty
-        
+                scaled_reward = max(0.1, 1.0 - lateness / self.due_date_offset_mean)
+                completion_reward += scaled_reward
+                self.total_lateness_penalty += (1.0 - scaled_reward)
+            else:
+                completion_reward += 1.0
+
+        # ===== SUM ALL REWARDS =====
+        reward = (action_validation_reward + launch_reward + heating_reward + 
+                 wait_reward + energy_cost_penalty + lateness_penalty + completion_reward)
         self.total_reward += reward
-        
-        # Check termination
+
+        # ===== TERMINATION =====
         terminated = self.current_time >= self.horizon
         truncated = False
-        
+
         observation = self._get_state_vector()
         info = {
             'queue_length': len(self.queue),
@@ -609,10 +620,18 @@ class DynamicOvenBatchingEnv(gym.Env):
             'total_lateness_penalty': self.total_lateness_penalty,
             'current_time': self.current_time,
             'action_mask': self._get_action_mask(),
-            'late_jobs_count': self.late_jobs_count
+            'late_jobs_count': self.late_jobs_count,
+            'action_validation_reward': action_validation_reward,
+            'launch_reward': launch_reward,
+            'heating_reward': heating_reward,
+            'wait_reward': wait_reward,
+            'energy_cost_penalty': energy_cost_penalty,
+            'lateness_penalty': lateness_penalty,
+            'completion_reward': completion_reward
         }
-        
+
         return observation, reward, terminated, truncated, info
+
     
     def render(self, mode='human'):
         """Render the current state (simplified)"""

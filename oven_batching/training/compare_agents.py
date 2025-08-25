@@ -13,7 +13,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from environment.core import DynamicOvenBatchingEnv
 from agents.ppo_agent import BasicPPOAgent
-from agents.fifo_agent import FIFOAgent
+
 from agents.random_agent import RandomAgent
 
 
@@ -28,14 +28,14 @@ def main():
         'oven_capacity': 9,
         'batch_time': 10.0,
         'batch_energy_cost': 5.0,
-        'heating_time': 15.0,
-        'cooling_rate': 0.1,
+        'heating_time': 5.0,
+        'cooling_rate': 0.01,
         'horizon': 1440.0,
         'arrival_rate': 0.5,
         'due_date_offset_mean': 60.0,
         'due_date_offset_std': 20.0,
         'energy_alpha': 0.3,  # Energy penalty multiplier
-        'lateness_beta': 0.3,  # Lateness penalty multiplier
+        'lateness_beta': 1.0,  # Lateness penalty multiplier
         'use_dynamic_arrivals': True,
         'time_step': 1.0
     }
@@ -43,8 +43,8 @@ def main():
     print(f"Environment created with {env.unwrapped.num_ovens} ovens")
     
     # Training parameters - increased for better learning
-    total_timesteps = 1000000  # Increased significantly
-    num_evaluation_episodes = 50  # Reduced for faster evaluation
+    total_timesteps = 500000  # Increased significantly
+    num_evaluation_episodes = 10  # Reduced for faster evaluation
     
     # Directories
     save_dir = "./saved_models"
@@ -56,24 +56,22 @@ def main():
                               hyperparameters={'n_steps': 2048,  
                                                 'batch_size': 64,  
                                                 'n_epochs': 4,  # Fewer epochs
-                                                'gamma': 0.74, 
+                                                'gamma': 0.99, 
                                                 'gae_lambda': 0.95, 
                                                 'clip_range': 0.2,
                                                 'ent_coef': 0.1,  # Encourage exploration
                                                 'vf_coef': 0.5,
                                                 'max_grad_norm': 0.5,
-                                                'verbose': 0})  # Enable verbose output
+                                                'verbose': 0}) 
     
     ppo_agent.train(total_timesteps=total_timesteps, log_dir=save_dir)
     
     # Create other agents
-    fifo_agent = FIFOAgent(env)
     random_agent = RandomAgent(env)
     
     # Evaluate all agents
     agents = {
         'PPO': ppo_agent,
-        'FIFO': fifo_agent,
         'Random': random_agent
     }
     
@@ -109,8 +107,6 @@ def main():
                 action, _ = agent.predict(obs)
                 obs, reward, done, truncated, info = env.step(action)
                 
-                episode_reward += reward
-                
                 # Extract metrics from info if available
                 if 'total_energy_cost' in info:
                     episode_energy_cost = info['total_energy_cost']
@@ -120,6 +116,8 @@ def main():
                     jobs_completed = info['completed_jobs']
                 if 'late_jobs_count' in info:
                     jobs_late = info['late_jobs_count']
+                if 'total_reward' in info:
+                    episode_reward = info['total_reward']
             
             # Calculate throughput
             throughput = jobs_completed / env.unwrapped.horizon if env.unwrapped.horizon > 0 else 0
