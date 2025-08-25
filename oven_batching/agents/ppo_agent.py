@@ -15,7 +15,7 @@ import os
 class BasicPPOAgent:
     """Basic PPO agent using stable-baselines3"""
     
-    def __init__(self, env, learning_rate: float = 3e-4, seed: Optional[int] = None):
+    def __init__(self, env, learning_rate: float = 3e-4, seed: Optional[int] = None, hyperparameters: Optional[dict] = None):
         """
         Initialize basic PPO agent
         
@@ -23,6 +23,7 @@ class BasicPPOAgent:
             env: The environment to interact with
             learning_rate: Learning rate for the optimizer
             seed: Random seed
+            hyperparameters: Dictionary of PPO hyperparameters
         """
         self.env = env
         self.seed = seed
@@ -34,25 +35,34 @@ class BasicPPOAgent:
         
         self.training_env = DummyVecEnv([make_env])
         
-        # Initialize PPO model with better settings for this environment
+        # Default hyperparameters
+        default_hyperparams = {
+            'n_steps': 2048,
+            'batch_size': 64,
+            'n_epochs': 10,
+            'gamma': 0.99,
+            'gae_lambda': 0.95,
+            'clip_range': 0.2,
+            'ent_coef': 0.05,
+            'vf_coef': 0.5,
+            'max_grad_norm': 0.5,
+            'verbose': 0
+        }
+        
+        # Update with provided hyperparameters
+        if hyperparameters:
+            default_hyperparams.update(hyperparameters)
+        
+        # Initialize PPO model
         self.model = PPO(
             "MlpPolicy",
             self.training_env,
             learning_rate=learning_rate,
-            n_steps=2048,  # Increased for better exploration
-            batch_size=64,
-            n_epochs=10,   # More epochs for better learning
-            gamma=0.99,
-            gae_lambda=0.95,
-            clip_range=0.2,
-            ent_coef=0.01,  # Encourage exploration
-            vf_coef=0.5,
-            max_grad_norm=0.5,
-            verbose=0,
-            seed=seed
+            seed=seed,
+            **default_hyperparams
         )
     
-    def train(self, total_timesteps: int = 50000, log_dir: str = "./ppo_logs"):
+    def train(self, total_timesteps: int = 50000, log_dir: str = "./saved_models"):
         """
         Train the PPO agent
         
@@ -62,7 +72,6 @@ class BasicPPOAgent:
         """
         os.makedirs(log_dir, exist_ok=True)
         
-        print(f"Training PPO agent for {total_timesteps} timesteps...")
         self.model.learn(total_timesteps=total_timesteps, progress_bar=True)
         
         # Save the model
@@ -78,7 +87,7 @@ class BasicPPOAgent:
     
     def predict(self, observation, state=None, deterministic=False) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """
-        Predict action based on current observation
+        Predict action based on current observation using the trained PPO model
         
         Args:
             observation: Current environment observation
@@ -91,47 +100,45 @@ class BasicPPOAgent:
         if not self.is_trained:
             raise RuntimeError("Model must be trained before making predictions")
         
-        # Get action mask
+        # Get action mask to ensure valid actions
         action_mask = self.env.get_action_mask()
         
-        # Extract information from observation
-        queue_length = int(observation[1])  # Queue length is at index 1
-        current_time = self.env.unwrapped.current_time
+        # Use the trained PPO model to predict action
+        action, state = self.model.predict(observation, state, deterministic)
         
-        # Smart action selection based on environment state
-        if queue_length > 0:
-            # We have jobs to process
-            ready_ovens = []
-            cold_ovens = []
-            
-            for i, oven in enumerate(self.env.unwrapped.ovens):
-                if oven.is_ready_to_start(current_time):
-                    ready_ovens.append(i)
-                elif oven.status.value == 0 and oven.temperature < 0.99:  # IDLE and cold
-                    cold_ovens.append(i)
-            
-            if ready_ovens:
-                # Launch action with ready ovens
-                oven_id = ready_ovens[0]
-                num_panels = min(queue_length, self.env.unwrapped.ovens[oven_id].capacity)
-                # Ensure this panel count is valid
-                if action_mask[2][num_panels]:
-                    return np.array([1, oven_id, num_panels]), state
+        # Ensure the predicted action is valid according to action mask
+        action_type, oven_id, num_panels = action
+        
+        # Validate action type (0=wait, 1=launch, 2=heat)
+        if action_type not in [0, 1, 2]:
+            action_type = 0  # Default to wait if invalid
+        
+        # Validate oven_id
+        if oven_id < 0 or oven_id >= len(self.env.unwrapped.ovens):
+            oven_id = 0  # Default to first oven if invalid
+        
+        # Validate num_panels based on action type
+        if action_type == 1:  # Launch action
+            # For launch, num_panels should be valid according to action_mask[2]
+            if not action_mask[2][num_panels]:
+                # Find a valid panel count
+                valid_panels = np.where(action_mask[2])[0]
+                if len(valid_panels) > 0:
+                    num_panels = valid_panels[0]  # Use first valid option
                 else:
-                    # Find the maximum valid panel count
-                    valid_panels = np.where(action_mask[2])[0]
-                    if len(valid_panels) > 0:
-                        num_panels = valid_panels[-1]
-                        return np.array([1, oven_id, num_panels]), state
-            
-            elif cold_ovens:
-                # Heat action for cold ovens
-                oven_id = cold_ovens[0]
-                if action_mask[1][oven_id]:
-                    return np.array([2, oven_id, 0]), state
+                    action_type = 0  # No valid launch possible, default to wait
+                    num_panels = 0
+        elif action_type == 2:  # Heat action
+            # For heat, check if the oven can be heated
+            if not action_mask[1][oven_id]:
+                action_type = 0  # Cannot heat this oven, default to wait
+                num_panels = 0
+            else:
+                num_panels = 0  # Heat actions always have 0 panels
+        else:  # Wait action (action_type == 0)
+            num_panels = 0
         
-        # Default to wait action if no other actions are appropriate
-        return np.array([0, 0, 0]), state
+        return np.array([action_type, oven_id, num_panels]), state
     
     def reset(self):
         """Reset agent state"""

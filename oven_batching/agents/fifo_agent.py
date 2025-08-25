@@ -18,15 +18,13 @@ class FIFOAgent:
         """
         self.env = env
     
-    def predict(self, observation, state=None, deterministic=False) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    def predict(self, observation, state=None) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """
         Predict action based on current observation using FIFO strategy
         
         Args:
             observation: Current environment observation
-            state: Agent state (not used for FIFO agent)
-            deterministic: Whether to use deterministic policy (not used for FIFO agent)
-            
+            state: Agent state (not used for FIFO agent)            
         Returns:
             Tuple of (action, state)
         """
@@ -42,7 +40,7 @@ class FIFOAgent:
         
         for oven_id in valid_ovens:
             oven = self.env.unwrapped.ovens[oven_id]
-            if oven.is_ready_to_start(self.env.unwrapped.current_time):
+            if oven.is_ready_to_start():
                 ready_ovens.append(oven_id)
         
         # Strategy 1: If we have jobs and ready ovens, launch a batch
@@ -64,7 +62,7 @@ class FIFOAgent:
         if queue_length > 0:
             for oven_id in valid_ovens:
                 oven = self.env.unwrapped.ovens[oven_id]
-                if oven.status.value == 0 and oven.temperature < 0.99:  # IDLE and cold
+                if oven.status.value == 0 and oven.temperature < 1.0:  # IDLE and cold
                     return np.array([2, oven_id, 0]), state
         
         # Strategy 3: If no immediate actions possible, wait

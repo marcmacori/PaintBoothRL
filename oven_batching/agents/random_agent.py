@@ -18,7 +18,7 @@ class RandomAgent:
         """
         self.env = env
     
-    def predict(self, observation, state=None, deterministic=False) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    def predict(self, state=None) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """
         Predict action based on current observation
         

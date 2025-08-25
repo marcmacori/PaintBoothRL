@@ -6,7 +6,7 @@ The agent must decide when to launch oven batches to balance throughput, energy 
 """
 
 from .environment import DynamicOvenBatchingEnv, Oven, Job, OvenStatus
-from .agents import RandomAgent, PPOAgent
+from .agents import RandomAgent, BasicPPOAgent
 
 __version__ = "1.0.0"
 __author__ = "Capstone Project Team"
@@ -17,5 +17,5 @@ __all__ = [
     "Job",
     "OvenStatus",
     "RandomAgent",
-    "PPOAgent"
+    "BasicPPOAgent"
 ]
